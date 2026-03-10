@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..core.exceptions_enhanced import DiskSpaceError, MemoryLimitError, log_and_reraise
 from ..utils.path_utils import normalize_path
@@ -1306,7 +1306,7 @@ class VRAMBatchScheduler:
 
     def submit_batch(
         self,
-        batch_func: callable,
+        batch_func: Callable,
         batch_args: tuple = (),
         batch_kwargs: Optional[Dict[str, Any]] = None,
         vram_required_gb: float = 1.0,
