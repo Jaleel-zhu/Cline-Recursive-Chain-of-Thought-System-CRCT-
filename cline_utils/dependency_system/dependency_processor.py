@@ -1926,6 +1926,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     """
     import time
 
+    if not hasattr(args, "_processed_pairs"):
+        args._processed_pairs = set()
+
     limit = args.limit
     dep_char = args.dep_char
     focus_key = args.key
@@ -1967,9 +1970,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             elif basename.endswith("_module.md"):
                 mini_trackers.append(t)
             else:
-                other_trackers.append(t)
+                pass
 
-        ordered_trackers = doc_trackers + mini_trackers + other_trackers
+        ordered_trackers = doc_trackers + mini_trackers
 
         dep_chars = ("p", "S", "s") if dep_char == "p" else (dep_char,)
         selected_tracker = None
@@ -1980,12 +1983,25 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             with open(t_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             try:
+                key_def_pairs = read_key_definitions_from_lines(lines)
                 _, grid_rows_data = read_grid_from_lines(lines)
                 found = False
-                for _, compressed_row in grid_rows_data:
+                for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
+                    if row_idx >= len(key_def_pairs):
+                        continue
                     decomp = list(decompress(compressed_row))
-                    if any(c in decomp for c in dep_chars):
-                        found = True
+                    for col_idx, char in enumerate(decomp):
+                        if char in dep_chars and col_idx < len(key_def_pairs):
+                            tgt_key_label, _ = key_def_pairs[col_idx]
+                            if (
+                                t_path,
+                                row_label,
+                                tgt_key_label,
+                                char,
+                            ) not in args._processed_pairs:
+                                found = True
+                                break
+                    if found:
                         break
                 if found:
                     selected_tracker = t_path
@@ -2066,7 +2082,18 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         tgt_key_label, tgt_path = key_def_pairs[col_idx]
 
                         if tgt_path and os.path.exists(tgt_path):
-                            tasks.append((row_label, src_path, tgt_key_label, tgt_path))
+                            if (
+                                tracker_path,
+                                row_label,
+                                tgt_key_label,
+                                char,
+                            ) not in args._processed_pairs:
+                                tasks.append(
+                                    (row_label, src_path, tgt_key_label, tgt_path)
+                                )
+                                args._processed_pairs.add(
+                                    (tracker_path, row_label, tgt_key_label, char)
+                                )
         except Exception:
             continue
 
@@ -2242,6 +2269,10 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     if not tasks:
         if algo_tasks:
             print("No LLM tasks required. Finished resolving algorithmically.")
+            args.limit -= len(algo_tasks)
+            if args.limit > 0 and len(algo_tasks) > 0 and args.tracker is None:
+                print(f"Continuing to next tracker. Remaining limit: {args.limit}")
+                return handle_resolve_placeholders(args)
         return 0
 
     # Setup for token checks
@@ -2483,8 +2514,17 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     elapsed = time.time() - start_time
     print(
-        f"Batch processing complete. Resolved {total_processed} items in {elapsed:.2f}s."
+        f"Batch processing for {os.path.basename(tracker_path)} complete. Resolved {total_processed} items in {elapsed:.2f}s."
     )
+
+    actual_processed = total_processed + (len(algo_tasks) if algo_tasks else 0)
+    args.limit -= actual_processed
+    if args.limit > 0 and actual_processed > 0 and args.tracker is None:
+        print(f"Continuing to next tracker. Remaining limit: {args.limit}")
+        processor.close()
+        return handle_resolve_placeholders(args)
+
+    processor.close()
     return 0
 
 

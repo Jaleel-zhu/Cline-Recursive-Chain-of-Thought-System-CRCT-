@@ -686,7 +686,7 @@ def add_code_doc_dependency_to_checklist(
                 if len(cols) >= 3:
                     existing_row_check_str = f"| {cols[0]} | {cols[1]} | {cols[2]} |"
                     if new_row_check_str == existing_row_check_str:
-                        logger.info(
+                        logger.debug(
                             f"Duplicate dependency entry found in checklist, not adding: {new_row_to_insert}"
                         )
                         return True

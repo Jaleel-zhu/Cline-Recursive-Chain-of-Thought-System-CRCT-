@@ -16,13 +16,10 @@ from cline_utils.dependency_system.core.dependency_grid import (
 )
 from cline_utils.dependency_system.core.key_manager import (
     KeyInfo,
-    get_key_from_path,
     sort_key_strings_hierarchically,
-    sort_keys,
 )
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
-    get_project_root,
     is_subpath,
     join_paths,
     normalize_path,
@@ -179,7 +176,7 @@ def aggregate_dependencies_contextual(
     get_priority = config.get_char_priority
 
     # Stores module_path -> target_module_path -> (highest_priority_char, highest_priority)
-    aggregated_deps_prio = defaultdict(
+    aggregated_deps_prio: Dict[str, Dict[str, Tuple[str, int]]] = defaultdict(
         lambda: defaultdict(lambda: (PLACEHOLDER_CHAR, -1))
     )
     logger.info(
@@ -388,7 +385,7 @@ def aggregate_dependencies_contextual(
         )
 
     # --- Step 3: Convert to final output format (Using Paths) ---
-    final_suggestions = defaultdict(list)
+    final_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     # Sort source paths for deterministic output order
     sorted_source_paths = sorted(aggregated_deps_prio.keys())
     for source_path in sorted_source_paths:
