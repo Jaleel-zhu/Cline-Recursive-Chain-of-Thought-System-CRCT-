@@ -3,6 +3,9 @@
 import logging
 import re
 from typing import Any, Optional, Tuple
+import torch
+import gc
+from cline_utils.dependency_system.utils.resource_validator import ResourceValidator
 
 try:
     from llama_cpp import Llama
@@ -22,6 +25,7 @@ class LocalLLMProcessor:
         self.model_path = model_path
         self.max_n_ctx = 32768
         self.current_n_ctx = n_ctx
+        self._current_n_gpu_layers: int = 0
         self._model: Optional[Any] = None
         self._pinned_state: Optional[Any] = None
 
@@ -29,13 +33,13 @@ class LocalLLMProcessor:
         """Saves the current KV cache state (e.g., after processing a system prompt)."""
         if self._model and hasattr(self._model, "save_state"):
             self._pinned_state = self._model.save_state()
-            logger.debug("KV cache state pinned successfully.")
+            logger.info("KV cache state pinned successfully.")
 
     def restore_pinned_state(self):
         """Restores the previously pinned KV cache state."""
         if self._model and self._pinned_state and hasattr(self._model, "load_state"):
             self._model.load_state(self._pinned_state)
-            logger.debug("Pinned KV cache state restored.")
+            logger.info("Pinned KV cache state restored.")
 
     def _load_model(self, required_ctx: int):
         # Context sizing strategy: dynamic "orbiting" allocation
@@ -77,22 +81,77 @@ class LocalLLMProcessor:
                 logger.info(
                     f"Reloading model to increase n_ctx from {current} to {n_ctx}"
                 )
+
             self.close()
 
         if Llama is None:
             raise ImportError("llama-cpp-python is not installed.")
 
-        logger.info(f"Loading local LLM from {self.model_path} with n_ctx={n_ctx}...")
+        # --- Dynamic GPU/CPU Splitting ---
+        n_gpu_layers = -1
+        try:
+            validator = ResourceValidator()
+            gpu_stats = validator.validate_gpu()
+            if gpu_stats.get("gpu_available"):
+                vram_available_mb = gpu_stats.get("vram_available_mb", 0.0)
+                if vram_available_mb > 0:
+                    MB_PER_LAYER = 125
+
+                    # Empirical estimation parameters
+                    base_overhead_mb = 30
+                    mb_per_1k_tokens = 120
+
+                    safety_buffer_mb = max(
+                        500, vram_available_mb * 0.1
+                    )  # Minimum 500MB safety buffer
+
+                    # Calculate estimated memory for context
+                    context_memory_mb = (
+                        base_overhead_mb + (n_ctx / 1000.0) * mb_per_1k_tokens
+                    )
+
+                    ideal_vram_mb = (
+                        context_memory_mb + (36 * MB_PER_LAYER) + safety_buffer_mb
+                    )
+
+                    if vram_available_mb >= ideal_vram_mb:
+                        n_gpu_layers = 36
+                        vram_ratio = 1.0
+                    else:
+                        # Gradient allocation ensures any free VRAM contributes to GPU layers
+                        # rather than strictly zeroing out if buffer thresholds aren't met
+                        vram_ratio = (
+                            vram_available_mb / ideal_vram_mb
+                            if ideal_vram_mb > 0
+                            else 1.0
+                        )
+                        n_gpu_layers = max(0, min(36, int(36 * vram_ratio)))
+
+                    logger.info(
+                        f"Dynamic VRAM check: {vram_available_mb}MB free. "
+                        f"Est. Context: {context_memory_mb:.1f}MB, Reserve: {safety_buffer_mb:.1f}MB. "
+                        f"Ratio: {vram_ratio:.2f}. "
+                        f"Assigning {n_gpu_layers} layers to GPU."
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Failed to dynamically calculate VRAM layer split: {e}. Defaulting to full GPU offload."
+            )
+
+        logger.info(
+            f"Loading local LLM from {self.model_path} with n_ctx={n_ctx} and n_gpu_layers={n_gpu_layers}..."
+        )
         self._model = Llama(
             model_path=self.model_path,
             n_ctx=n_ctx,
-            n_gpu_layers=-1,
+            n_gpu_layers=n_gpu_layers,
             verbose=False,
             type_k=8,
             type_v=8,
             flash_attn=True,
         )
         self.current_n_ctx = n_ctx
+        self._current_n_gpu_layers = n_gpu_layers
         return self._model
 
     def get_token_count(self, text: str) -> int:
@@ -124,15 +183,15 @@ class LocalLLMProcessor:
         if instructional_prompt is None:
             instructional_prompt = """
 *   **Determine Relationship (CRITICAL STEP)**: Based on file contents, determine the **true relational necessity or essential conceptual link** between the source (`key_string`) and each target key being verified.
-    *   **Go Beyond Semantic Similarity**: Suggestions ('s', 'S') might only indicate related topics. However, if the source file defines the "Why," the rules, or the architecture for the target, it is an essential dependency.
-*   **Focus on Relational and Contextual Necessity**: Ask:
+    *   **Go Beyond Semantic Similarity**: Suggestions might only indicate related topics. However, if either file defines the "Why," the rules, or the architecture for the other, it is an essential dependency.
+*   **Focus on Relational and Contextual Necessity**:
     *   **Logic & Purpose**: Does the *row file* provide the business logic, requirements, or purpose that the *column file* implements? (Leads to 'd' or '<').
     *   **Technical Reliance**: Does the code in the *row file* directly **import, call, or inherit from** code in the *column file*? (Leads to '<' or 'x').
     *   **Knowledge Requirement**: Does a developer/LLM need to read the *column file* to safely or correctly modify the *row file*? (Leads to '<' or 'd').
     *   **Implementation Link**: Is the *row file* **essential documentation** for understanding or implementing the concepts/code in the *column file*? (Leads to 'd' or '>').
     *   **Architectural Fit**: Are these files part of the same specific feature or architectural pattern where changing one without the other would cause conceptual drift or technical debt? (Leads to 'x', '<', '>', or 'd').
-*   **Purpose of Dependencies**: Remember, these verified dependencies guide the **Strategy phase** (determining task order) and the **Execution phase** (loading minimal necessary context). A dependency should mean "This file is part of the necessary context required to work effectively on the other."
-*   **Assign 'n' ONLY for Unrelated Content**: If the relationship is purely coincidental, uses similar common terms in a different context, or is an unrelated legacy file, assign 'n' (verified no dependency). **If there is any doubt regarding conceptual relevance, err on the side of 'd' (Documentation/Conceptual link) rather than 'n'.**
+*   **Purpose of Dependencies**: Verified dependencies guide the **Strategy phase** and the **Execution phase**. A dependency should mean "This file is part of the necessary context required to work effectively on the other."
+*   **Assign 'n' ONLY for Unrelated Content**: If the relationship is purely coincidental, uses similar common terms in a different context, or is an unrelated file, assign 'n'. **If there is any doubt regarding conceptual relevance, err on the side of 'd' (Documentation/Conceptual link) rather than 'n'.**
 
 **Dependency Criteria**
     * '<' (Row Requires Column): Row relies on Column for context, logic, or operation
@@ -142,23 +201,23 @@ class LocalLLMProcessor:
     * 'n' (Verified No Dependency): Confirmed NO relational, functional, or conceptual link exists
 
 **Instructions**
-1. Analyze the relationship (Functional, Logical, or Conceptual) between source and target
-2. Determine the appropriate dependency character (<, >, x, d, or n)
-3. State your reasoning for the chosen dependency type
-4. Provide a summary of your findings in the format:
+1. Analyze the relationship (Functional, Logical, Conceptual, Architectural) between source and target
+2. Determine the dependency character that best represents the relationship (<, >, x, d, n)
+3. State your reasoning for the chosen dependency type, keep it concise and to the point
+4. Provide a summary in the format:
    Dependency Verification Results:
 
    [Source File] [Target File] -> [Dependency Character]
    Reasoning: [Your reasoning]
 
-Important Notes
-- Focus on Relational Necessity: Does one file provide the context or blueprint for the other?
-- Err on the side of 'd' if the files share a logical flow or implementation goal.
-- 'x', '<', and '>' are directional and apply to *all* files, not just code. If a clear directional dependency exists their use should be prioritized over 'd'.
-- DO NOT add decorators (**) or other characters (``) to the dependency character.
+Important Notes:
+- Focus on Relational Necessity: Does one file provide the context, blueprint, or understanding for the other?
+- Files that share a logical flow or implementation goal indicate a positive dependency.
+- If a clear directional dependency exists 'x', '<', or '>' should be prioritized.
+- DO NOT add decorators or other characters (``, **, etc) to the Dependency Character.
 
-Expected Output
-A clear summary of dependency determination for the source and target files with reasoning.
+Expected Output:
+Clear summary of dependency determination in the format dictated in instruction 4.
             """
 
         # Base overhead for prompt structure
@@ -263,6 +322,10 @@ A clear summary of dependency determination for the source and target files with
         return "p", result_text
 
     def close(self):
-        if self._model:
+        if self._model is not None:
             del self._model
             self._model = None
+            self._current_n_gpu_layers = 0
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()

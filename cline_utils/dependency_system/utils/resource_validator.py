@@ -255,7 +255,7 @@ class ResourceValidator:
                     warnings_list.append(warning_msg)
 
             # GPU/VRAM validation
-            gpu_check = self._validate_gpu()
+            gpu_check = self.validate_gpu()
             resource_check["gpu"] = gpu_check
 
             # Project-specific validation
@@ -525,7 +525,9 @@ class ResourceValidator:
             import psutil
 
             cores: int = psutil.cpu_count(logical=False) or 1  # Physical cores
-            logical_cores: int = psutil.cpu_count(logical=True) or 1  # Logical processors
+            logical_cores: int = (
+                psutil.cpu_count(logical=True) or 1
+            )  # Logical processors
 
             recommended_cores = 2  # Minimum recommended for efficient analysis
 
@@ -561,7 +563,7 @@ class ResourceValidator:
                 "fallback": True,
             }
 
-    def _validate_gpu(self) -> Dict[str, Any]:
+    def validate_gpu(self) -> Dict[str, Any]:
         """Validate GPU/VRAM availability and collect hardware details."""
         check_result: Dict[str, Any] = {
             "gpu_available": False,
@@ -606,7 +608,9 @@ class ResourceValidator:
 
                 # Driver / CUDA version (best-effort)
                 try:
-                    cuda_ver = torch.version.cuda
+                    from torch.version import cuda as cuda_version
+
+                    cuda_ver = cuda_version
                     check_result["cuda_version"] = cuda_ver
                 except Exception:
                     pass
@@ -716,7 +720,9 @@ class ResourceValidator:
 
         return max_depth_found
 
-    def _generate_recommendations(self, validation_results: Dict[str, Any]) -> list[str]:
+    def _generate_recommendations(
+        self, validation_results: Dict[str, Any]
+    ) -> list[str]:
         """Generate recommendations based on validation results."""
         recommendations = []
 

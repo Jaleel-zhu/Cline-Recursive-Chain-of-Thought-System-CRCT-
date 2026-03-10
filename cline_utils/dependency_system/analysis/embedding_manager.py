@@ -688,7 +688,7 @@ def generate_symbol_essence_string(
     is_doc_like = file_type == "md" or file_path.lower().endswith(
         (".md", ".txt", ".rst")
     )
-    if full_tokens and full_tokens < 8192 and content and is_doc_like:
+    if full_tokens and full_tokens < 12800 and content and is_doc_like:
         current_len = len("\n".join(parts))
         max_content_chars = max(0, max_chars - current_len - len("CONTENT:\n"))
         if max_content_chars > 0:
@@ -2847,9 +2847,9 @@ def generate_embeddings(
             tracker.set_description(f"Embedding {os.path.basename(item['rel_path'])}")
 
             # Calculate required n_ctx for this item
-            # Formula: max(actual_tokens + 512, 8192)
+            # Formula: max(actual_tokens + 512, 12800)
             # Cap at MAX_CONTEXT_LENGTH
-            required_n_ctx = min(max(item["tokens"] + 512, 8192), MAX_CONTEXT_LENGTH)
+            required_n_ctx = min(max(item["tokens"] + 512, 12800), MAX_CONTEXT_LENGTH)
 
             # Ensure model is loaded with sufficient context
             try:
