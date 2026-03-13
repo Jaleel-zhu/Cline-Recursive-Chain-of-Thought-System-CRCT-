@@ -1,10 +1,13 @@
 # cline_utils/dependency_system/analysis/local_llm_processor.py
 
+import gc
 import logging
+import os
 import re
 from typing import Any, Optional, Tuple
+
 import torch
-import gc
+
 from cline_utils.dependency_system.utils.resource_validator import ResourceValidator
 
 try:
@@ -28,6 +31,9 @@ class LocalLLMProcessor:
         self._current_n_gpu_layers: int = 0
         self._model: Optional[Any] = None
         self._pinned_state: Optional[Any] = None
+
+        # Setup repair logging
+        self._setup_repair_logging()
 
     def save_pinned_state(self):
         """Saves the current KV cache state (e.g., after processing a system prompt)."""
@@ -82,7 +88,7 @@ class LocalLLMProcessor:
                     f"Reloading model to increase n_ctx from {current} to {n_ctx}"
                 )
 
-            self.close()
+            self.close(pause_for_vram=True)
 
         if Llama is None:
             raise ImportError("llama-cpp-python is not installed.")
@@ -181,7 +187,7 @@ class LocalLLMProcessor:
             Tuple[str, str]: A tuple containing (dependency_char, full_response_text)
         """
         if instructional_prompt is None:
-            instructional_prompt = """
+            instructional_prompt = f"""
 *   **Determine Relationship (CRITICAL STEP)**: Based on file contents, determine the **true relational necessity or essential conceptual link** between the source (`key_string`) and each target key being verified.
     *   **Go Beyond Semantic Similarity**: Suggestions might only indicate related topics. However, if either file defines the "Why," the rules, or the architecture for the other, it is an essential dependency.
 *   **Focus on Relational and Contextual Necessity**:
@@ -204,17 +210,19 @@ class LocalLLMProcessor:
 1. Analyze the relationship (Functional, Logical, Conceptual, Architectural) between source and target
 2. Determine the dependency character that best represents the relationship (<, >, x, d, n)
 3. State your reasoning for the chosen dependency type, keep it concise and to the point
-4. Provide a summary in the format:
+4. You MUST return the result in this EXACT format, including the arrow '->':
+
    Dependency Verification Results:
 
-   [Source File] [Target File] -> [Dependency Character]
+   {source_basename} {target_basename} -> [Dependency Character]
    Reasoning: [Your reasoning]
 
 Important Notes:
-- Focus on Relational Necessity: Does one file provide the context, blueprint, or understanding for the other?
-- Files that share a logical flow or implementation goal indicate a positive dependency.
+- Does one file provide the context, blueprint, or understanding for the other?
+- Files that share a logical flow or implementation goal indicate a dependency.
 - If a clear directional dependency exists 'x', '<', or '>' should be prioritized.
-- DO NOT add decorators or other characters (``, **, etc) to the Dependency Character.
+- Do NOT use other arrow characters like '→'. Use '->'.
+- Do NOT add any extra text before or after the required format.
 
 Expected Output:
 Clear summary of dependency determination in the format dictated in instruction 4.
@@ -318,14 +326,235 @@ Clear summary of dependency determination in the format dictated in instruction 
                     break  # Stop at the first non-empty line above "Reasoning:"
 
         safe_text = result_text.encode("ascii", "backslashreplace").decode("ascii")
-        logger.warning(f"Unexpected model output: {safe_text}. Defaulting to 'p'.")
+        logger.warning(f"Unexpected model output: {safe_text}. Attempting repair.")
+
+        # Explicitly close with VRAM stabilization pause before repair reload.
+        # This ensures the repair call (which has a much smaller context)
+        # gets a fresh reading of available VRAM and can fully offload to GPU.
+        self.close(pause_for_vram=True)
+
+        # Try LLM-assisted repair for problematic outputs
+        repaired_char, repaired_text = self._repair_dependency_output(
+            result_text, source_basename, target_basename
+        )
+        if repaired_char != "p":
+            return repaired_char, repaired_text
+
         return "p", result_text
 
-    def close(self):
+    def _setup_repair_logging(self):
+        """Setup logging for repair attempts."""
+        self._repair_log_file = "debug_llm_repair.log"
+        self._repair_logger = logging.getLogger("debug_llm_repair")
+        self._repair_logger.setLevel(logging.INFO)
+
+        # Clear existing handlers to avoid duplicates
+        self._repair_logger.handlers = []
+
+        # Create file handler
+        file_handler = logging.FileHandler(
+            self._repair_log_file, mode="a", encoding="utf-8"
+        )
+        file_handler.setLevel(logging.INFO)
+
+        # Create formatter and add it to handler
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        file_handler.setFormatter(formatter)
+
+        # Add handler to logger
+        self._repair_logger.addHandler(file_handler)
+
+        logger.info(f"Repair logging setup complete. Log file: {self._repair_log_file}")
+
+    def _cleanup_repair_log_entry(self, source_basename: str, target_basename: str):
+        """Removes all repair log entries for this file pair from the log file."""
+        if not os.path.exists(self._repair_log_file):
+            return
+
+        try:
+            # Shutdown the logger temporarily to release the file
+            for handler in self._repair_logger.handlers[:]:
+                handler.close()
+                self._repair_logger.removeHandler(handler)
+
+            # Read and filter the file
+            with open(self._repair_log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            # Pattern that identifies entries for this pair
+            pattern_start = (
+                f"Repairing output for {source_basename} -> {target_basename}"
+            )
+
+            # We want to remove the block starting with pattern_start
+            # until either the end of the file or another "Repairing output for" starts
+            new_lines = []
+            skip_until_next = False
+
+            for line in lines:
+                if pattern_start in line:
+                    skip_until_next = True
+                    continue
+
+                if skip_until_next:
+                    # If we find another repair start, stop skipping
+                    if "Repairing output for" in line and " -> " in line:
+                        skip_until_next = False
+                        new_lines.append(line)
+                    continue
+
+                new_lines.append(line)
+
+            # Write back the filtered content
+            with open(self._repair_log_file, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+
+            # Restart the logger
+            self._setup_repair_logging()
+
+            # self._repair_logger.info(
+            #     f"Log cleaned up for {source_basename} -> {target_basename}"
+            # )
+
+        except Exception as e:
+            logger.warning(f"Failed to cleanup repair log: {e}")
+            # Try to restart logger even if cleanup fails
+            self._setup_repair_logging()
+
+    def _repair_dependency_output(
+        self, original_output: str, source_basename: str, target_basename: str
+    ) -> Tuple[str, str]:
+        """
+        Makes a second LLM call to repair non-standard dependency output.
+        """
+        # Calculate tokens for the repair prompt
+        # We process less context than the original call because we only send the previous output
+        # Use existing context if possible
+        repair_prompt = f"""
+Analyze the following dependency analysis output and REFORMAT it to match the EXACT required structure.
+
+Original Output:
+\"\"\"
+{original_output}
+\"\"\"
+
+Instructions:
+1. Identify the intended dependency character from the output above (<, >, x, d, or n).
+2. You MUST return the result in this EXACT format, including the arrow '->':
+   Dependency Verification Results:
+   
+   {source_basename} {target_basename} -> [Character]
+   Reasoning: [Original reasoning, cleaned up]
+
+Example of GOOD output:
+Dependency Verification Results:
+
+my_file.py my_data.sql -> <
+Reasoning: The Python script directly executes the SQL file to apply schema updates.
+
+3. If no clear dependency character (<, >, x, d, or n) can be found, use 'p'.
+4. Do NOT use other arrow characters like '→'. Use '->'.
+5. Do NOT add any extra text before or after the required format.
+
+Return ONLY the reformatted output.
+"""
+
+        # Log the problematic output
+        self._repair_logger.info(
+            f"Repairing output for {source_basename} -> {target_basename}"
+        )
+        self._repair_logger.info(f"Original output: {original_output}")
+
+        try:
+            # Get exact tokens for repair prompt (instruction + original output)
+            # _load_model will reuse existing model if ctx sufficient
+            est_tokens = (
+                self.get_token_count(repair_prompt) + 500
+            )  # margin for response
+
+            model = self._load_model(est_tokens)
+            output = model(
+                repair_prompt,
+                max_tokens=500,
+                stop=["<|im_end|>"],
+                echo=False,
+                temperature=0.7,
+            )
+            repaired_text = output["choices"][0]["text"].strip()
+            self._repair_logger.info(f"Repaired output: {repaired_text}")
+            # Parse repaired output
+            lines = repaired_text.split("\n")
+            reasoning_idx = -1
+            for i, line in enumerate(lines):
+                if line.strip().startswith("Reasoning:"):
+                    reasoning_idx = i
+                    break
+
+            if reasoning_idx > 0:
+                for j in range(reasoning_idx - 1, -1, -1):
+                    prev_line = lines[j].strip()
+                    if prev_line:
+                        match = re.search(r"->\s*[`'\"*]*([<>xdn])", prev_line)
+                        if match:
+                            self._repair_logger.info(
+                                f"Repair successful: {match.group(1)}"
+                            )
+                            # Cleanup/mark success in log
+                            self._cleanup_repair_log_entry(
+                                source_basename, target_basename
+                            )
+                            return match.group(1), repaired_text
+                        break
+
+            self._repair_logger.warning("Repair failed to produce expected format.")
+            return "p", repaired_text
+
+        except Exception as e:
+            self._repair_logger.error(f"Error occurred while repairing output: {e}")
+            return "p", original_output
+        finally:
+            if self._model is not None:
+                self.close()
+
+    def close(self, pause_for_vram: bool = False):
+        """
+        Releases model and clears GPU memory.
+
+        Args:
+            pause_for_vram: If True, adds a brief synchronization delay to ensure
+                           VRAM state is stabilized for subsequent re-validation.
+        """
         if self._model is not None:
+            # Force cleanup of internal llama-cpp-python resources if possible
+            if hasattr(self._model, "__del__"):
+                try:
+                    self._model.__del__()
+                except Exception:
+                    pass
+
             del self._model
             self._model = None
             self._current_n_gpu_layers = 0
+
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+                try:
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                except Exception as e:
+                    logger.debug(f"CUDA synchronization failed during close: {e}")
+
+            # Multiple GC passes to ensure reference cycles are broken
+            for _ in range(3):
+                gc.collect()
+
+            if pause_for_vram:
+                # Brief pause to allow GPU driver to settle and ResourceValidator
+                # to get an accurate reading on the next call.
+                import time
+
+                time.sleep(0.5)
+                time.sleep(0.5)
+                time.sleep(0.5)
+                time.sleep(0.5)
+                time.sleep(0.5)
