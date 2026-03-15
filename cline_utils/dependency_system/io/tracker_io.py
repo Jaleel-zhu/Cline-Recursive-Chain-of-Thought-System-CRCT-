@@ -3303,17 +3303,26 @@ def update_tracker(
                 list(row) for row in temp_decomp_grid_rows
             ]  # Deep copy
 
-            internal_paths_for_pruning_set = {
-                ki.norm_path
-                for ki in original_final_key_info_list_before_pruning
-                if ki.parent_path == module_path_for_mini
-                or ki.norm_path == module_path_for_mini
-            }
-            paths_to_keep_after_pruning_set = internal_paths_for_pruning_set.copy()
-
             valid_paths_for_pruning = {
                 ki.norm_path for ki in original_final_key_info_list_before_pruning
             }
+            # True-native files are direct children of the module directory (not subdirectories).
+            # This re-checks native scope against the global map to avoid "sticky" foreigns
+            # that were previously present in the tracker.
+            native_file_paths_for_pruning = {
+                ki.norm_path
+                for ki in path_to_key_info.values()
+                if (not ki.is_directory) and ki.parent_path == module_path_for_mini
+            }
+            native_dir_paths_for_pruning = (
+                {module_path_for_mini} if module_path_for_mini else set()
+            )
+            internal_paths_for_pruning_set = {
+                p
+                for p in native_file_paths_for_pruning.union(native_dir_paths_for_pruning)
+                if p in valid_paths_for_pruning
+            }
+            paths_to_keep_after_pruning_set = internal_paths_for_pruning_set.copy()
             manual_foreign_pins_set = {
                 p
                 for p in manual_foreign_pins_set
