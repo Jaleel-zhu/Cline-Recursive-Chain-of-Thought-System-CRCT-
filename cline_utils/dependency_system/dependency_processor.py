@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from logging import LogRecord
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 from cline_utils.dependency_system.analysis.dependency_analyzer import analyze_file
 from cline_utils.dependency_system.analysis.dependency_suggester import (
@@ -137,7 +137,7 @@ def _load_token_metadata(project_root: str) -> Dict[str, Dict[str, int]]:
         "embeddings",
         "metadata.json",
     )
-    token_map = {}
+    token_map: Dict[str, Dict[str, Any]] = {}
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
@@ -212,7 +212,7 @@ def handle_determine_dependency(args: argparse.Namespace) -> int:
         embeddings_dir = os.path.join(project_root, embeddings_dir)
 
     metadata_path = os.path.join(embeddings_dir, "metadata.json")
-    token_metadata = {}
+    token_metadata: Dict[str, Any] = {}
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
@@ -456,12 +456,12 @@ def command_handler_analyze_project(args: argparse.Namespace) -> int:
                 # Remove known non-serializable keys
                 cleaned: Dict[str, Any] = {
                     k: make_serializable(v)
-                    for k, v in obj.items()
+                    for k, v in cast(Dict[str, Any], obj).items()
                     if k not in ("_ast_tree", "_ts_tree")
                 }
                 return cleaned
             elif isinstance(obj, list):
-                return [make_serializable(item) for item in obj]
+                return [make_serializable(item) for item in cast(List[Any], obj)]
             elif isinstance(obj, (str, int, float, bool, type(None))):
                 return obj
             else:
@@ -566,12 +566,12 @@ def handle_set_char(args: argparse.Namespace) -> int:
             lines = f.readlines()
 
         # Use tracker_io's parsing functions
-        defs_pairs = read_key_definitions_from_lines(lines)
+        defs_pairs: List[Tuple[str, str]] = read_key_definitions_from_lines(lines)
         _grid_hdrs, grid_rows_list = read_grid_from_lines(lines)
 
         # Find the first definition matching args.key to get its path and original index
         source_row_original_idx = -1
-        source_path_targetted = None
+        source_path_targetted: Optional[str] = None
         # The key from args.key is a KEY_LABEL from the tracker file (could be KEY or KEY#GI)
         for idx, (k_label_in_file, p_str) in enumerate(defs_pairs):
             if k_label_in_file == args.key:
@@ -600,8 +600,9 @@ def handle_set_char(args: argparse.Namespace) -> int:
             )
             return 1
 
-        target_path_targetted: str = defs_pairs[target_col_logical_index][1]
-        target_key_label_targetted: str = defs_pairs[target_col_logical_index][0]
+        _target_pair = cast(Tuple[str, str], defs_pairs[target_col_logical_index])
+        target_path_targetted: str = _target_pair[1]
+        target_key_label_targetted: str = _target_pair[0]
 
         print(
             f"\n--- Attempting to set relationship for paths (via low-level 'set_char' command) ---"
@@ -779,7 +780,9 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
     dep_type: str = args.dep_type
 
     # --- Import moved for early use ---
-    from cline_utils.dependency_system.io.update_doc_tracker import doc_tracker_data
+    from cline_utils.dependency_system.io.update_doc_tracker import (
+        doc_file_inclusion_logic,
+    )
 
     # ---
 
@@ -824,7 +827,7 @@ def handle_add_dependency(args: argparse.Namespace) -> int:
     # --- Pre-filter valid paths if tracker type requires it (e.g., 'doc') ---
     valid_paths_for_tracker: Optional[Set[str]] = None
     if tracker_type_val_add == "doc":
-        filtered_items_map: Dict[str, KeyInfo] = doc_tracker_data["file_inclusion"](
+        filtered_items_map: Dict[str, KeyInfo] = doc_file_inclusion_logic(
             project_root, global_map
         )
         valid_paths_for_tracker = set(filtered_items_map.keys())
@@ -1655,7 +1658,7 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
     project_root = get_project_root()
     token_map = _load_token_metadata(project_root)
     global_map = load_global_key_map()
-    key_to_path_map = {}
+    key_to_path_map: Dict[str, str] = {}
     if global_map:
         for k_info in global_map.values():
             key_to_path_map[k_info.key_string] = k_info.norm_path
@@ -1680,7 +1683,7 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
             print(f"Error: Key '{focus_key}' not found as a row in {tracker_path}.")
             return 1
 
-        for row_idx, (row_label, compressed_row) in enumerate(grid_rows_data):
+        for _, (row_label, compressed_row) in enumerate(grid_rows_data):
             if focus_key and row_label != focus_key:
                 continue
 
@@ -1717,7 +1720,7 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
             unverified_deps.keys(), key=get_sortable_parts_for_key
         )
         for source_label in sorted_source_keys:
-            source_path = key_to_path_map.get(source_label, "Path not found")
+            source_path: str = key_to_path_map.get(source_label, "Path not found")
             source_token_count = token_map.get(normalize_path(source_path))
             source_token_info = (
                 f" [Tokens: {source_token_count}]"
@@ -1734,7 +1737,7 @@ def handle_show_placeholders(args: argparse.Namespace) -> int:
                 )
                 print(f"  {char_type}:")
                 for tgt in target_labels:
-                    tgt_path = key_to_path_map.get(tgt, "Path not found")
+                    tgt_path: str = key_to_path_map.get(tgt, "Path not found")
                     tgt_token_count = token_map.get(normalize_path(tgt_path))
                     tgt_token_info = (
                         f" [Tokens: {tgt_token_count}]"
@@ -1928,6 +1931,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     if not hasattr(args, "_processed_pairs"):
         args._processed_pairs = set()
+    processed_pairs = cast(Set[Tuple[str, str, str, str]], args._processed_pairs)
 
     limit = args.limit
     dep_char = args.dep_char
@@ -1960,9 +1964,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                 print("Error: No trackers found in the project.", file=sys.stderr)
                 return 1
 
-        doc_trackers = []
-        mini_trackers = []
-        other_trackers = []
+        doc_trackers: List[str] = []
+        mini_trackers: List[str] = []
+        _other_trackers: List[str] = []
         for t in all_trackers:
             basename = os.path.basename(t)
             if "doc_tracker.md" in basename:
@@ -1975,7 +1979,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         ordered_trackers = doc_trackers + mini_trackers
 
         dep_chars = ("p", "S", "s") if dep_char == "p" else (dep_char,)
-        selected_tracker = None
+        selected_tracker: Optional[str] = None
 
         for t_path in ordered_trackers:
             if not os.path.isfile(t_path):
@@ -1998,7 +2002,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                 row_label,
                                 tgt_key_label,
                                 char,
-                            ) not in args._processed_pairs:
+                            ) not in processed_pairs:
                                 found = True
                                 break
                     if found:
@@ -2015,13 +2019,13 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             )
             return 0
 
-        tracker_path = selected_tracker
+        tracker_path: str = str(selected_tracker)
         dep_chars_str = "', '".join(dep_chars)
         print(
             f"Automatically selected tracker: {tracker_path} (scanning for: '{dep_chars_str}')"
         )
     else:
-        tracker_path = normalize_path(args.tracker)
+        tracker_path: str = str(normalize_path(args.tracker))
         if not os.path.isfile(tracker_path):
             print(
                 f"Error: Tracker file not found or is a directory: {tracker_path}",
@@ -2069,7 +2073,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
         if row_idx >= len(key_def_pairs):
             continue
 
-        src_key_from_def, src_path = key_def_pairs[row_idx]
+        _, src_path = key_def_pairs[row_idx]
 
         if not src_path or not os.path.exists(src_path):
             continue
@@ -2087,11 +2091,11 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                                 row_label,
                                 tgt_key_label,
                                 char,
-                            ) not in args._processed_pairs:
+                            ) not in processed_pairs:
                                 tasks.append(
                                     (row_label, src_path, tgt_key_label, tgt_path)
                                 )
-                                args._processed_pairs.add(
+                                processed_pairs.add(
                                     (tracker_path, row_label, tgt_key_label, char)
                                 )
         except Exception:
@@ -2129,7 +2133,7 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                 defs = t_data.get("definitions_ordered", [])
                 grid = t_data.get("grid_rows_ordered", [])
                 key_to_path = {k: normalize_path(p) for k, p in defs}
-                keys_list = [k for k, p in defs]
+                keys_list = [k for k, _ in defs]
 
                 for row_k, comp_row in grid:
                     try:
@@ -2316,7 +2320,81 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     )
 
     processor = LocalLLMProcessor(model_path=model_path)
-    collector = TrackerBatchCollector()
+
+    import concurrent.futures
+
+    commit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    commit_futures: List[concurrent.futures.Future[None]] = []
+
+    def background_commit(
+        b_tracker_path: str,
+        b_path_to_key_info: Dict[str, KeyInfo],
+        b_tracker_type: str,
+        b_suggestions: Dict[str, List[Tuple[str, str]]],
+    ) -> None:
+        try:
+            update_data = update_tracker(
+                output_file_suggestion=b_tracker_path,
+                path_to_key_info=b_path_to_key_info,
+                tracker_type=b_tracker_type,
+                suggestions_external=b_suggestions,
+                return_update=True,
+                force_apply_suggestions=True,
+                apply_ast_overrides=False,
+            )
+            if update_data:
+                t_update = None
+                out_path = update_data.get("output_file", b_tracker_path)
+                if b_tracker_type == "mini":
+                    t_update = create_mini_tracker_update(
+                        output_file=out_path,
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        module_path=update_data.get("module_path", ""),
+                        path_to_key_info=update_data.get(
+                            "path_to_key_info", b_path_to_key_info
+                        ),
+                        existing_lines=update_data.get("existing_lines", []),
+                        tracker_exists=update_data.get("tracker_exists", False),
+                    )
+                elif b_tracker_type == "doc":
+                    t_update = create_doc_tracker_update(
+                        output_file=out_path,
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        path_to_key_info=update_data.get(
+                            "path_to_key_info", b_path_to_key_info
+                        ),
+                    )
+                else:  # main
+                    t_update = create_main_tracker_update(
+                        output_file=out_path,
+                        key_info_list=update_data["key_info_list"],
+                        grid_rows=update_data["grid_rows"],
+                        last_key_edit=update_data["last_key_edit"],
+                        last_grid_edit=update_data["last_grid_edit"],
+                        path_to_key_info=update_data.get(
+                            "path_to_key_info", b_path_to_key_info
+                        ),
+                    )
+
+                if t_update:
+                    thread_collector = TrackerBatchCollector()
+                    thread_collector.add(t_update)
+                    thread_collector.commit_all()
+                else:
+                    print(
+                        "Error: Failed to create tracker update object in background thread."
+                    )
+            else:
+                print("Error: Failed to generate update data")
+        except Exception as e:
+            logger.error(f"Error processing background commit: {e}", exc_info=True)
+            print(f"Error processing background commit: {e}")
 
     batch_suggestions: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     processed_count = 0
@@ -2404,60 +2482,19 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             total_processed += 1
 
             if processed_count >= 10:
-                print("Committing batch of 10 updates...")
-                update_data = update_tracker(
-                    output_file_suggestion=tracker_path,
-                    path_to_key_info=global_map,
-                    tracker_type=tracker_type,
-                    suggestions_external=batch_suggestions,
-                    return_update=True,
-                    force_apply_suggestions=True,
-                    apply_ast_overrides=False,
+                print("Submitting batch of 10 updates to background thread...")
+                suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
+                future = commit_executor.submit(
+                    background_commit,
+                    tracker_path,
+                    global_map,
+                    tracker_type,
+                    suggestions_copy,
                 )
+                commit_futures.append(future)
 
-                if update_data:
-                    # Create TrackerUpdate
-                    t_update = None
-                    if tracker_type == "mini":
-                        t_update = create_mini_tracker_update(
-                            output_file=update_data["output_file"],
-                            key_info_list=update_data["key_info_list"],
-                            grid_rows=update_data["grid_rows"],
-                            last_key_edit=update_data["last_key_edit"],
-                            last_grid_edit=update_data["last_grid_edit"],
-                            module_path=update_data["module_path"],
-                            path_to_key_info=update_data["path_to_key_info"],
-                            existing_lines=update_data["existing_lines"],
-                            tracker_exists=update_data["tracker_exists"],
-                        )
-                    elif tracker_type == "doc":
-                        t_update = create_doc_tracker_update(
-                            output_file=tracker_path,
-                            key_info_list=update_data["key_info_list"],
-                            grid_rows=update_data["grid_rows"],
-                            last_key_edit=update_data["last_key_edit"],
-                            last_grid_edit=update_data["last_grid_edit"],
-                            path_to_key_info=global_map,
-                        )
-                    else:  # main
-                        t_update = create_main_tracker_update(
-                            output_file=tracker_path,
-                            key_info_list=update_data["key_info_list"],
-                            grid_rows=update_data["grid_rows"],
-                            last_key_edit=update_data["last_key_edit"],
-                            last_grid_edit=update_data["last_grid_edit"],
-                            path_to_key_info=global_map,
-                        )
-
-                    if t_update:
-                        collector.add(t_update)
-                        collector.commit_all()
-                        batch_suggestions.clear()
-                        processed_count = 0
-                    else:
-                        print("Error: Failed to create tracker update object.")
-                else:
-                    print("Error: Failed to generate update data")
+                batch_suggestions.clear()
+                processed_count = 0
 
         except Exception as e:
             logger.error(f"Error processing pair {src_key}->{tgt_key}: {e}")
@@ -2465,52 +2502,25 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     # Final Commit
     if processed_count > 0:
-        print(f"Committing final batch of {processed_count} updates...")
-        update_data = update_tracker(
-            output_file_suggestion=tracker_path,
-            path_to_key_info=global_map,
-            tracker_type=tracker_type,
-            suggestions_external=batch_suggestions,
-            return_update=True,
-            force_apply_suggestions=True,
-            apply_ast_overrides=False,
+        print(
+            f"Submitting final batch of {processed_count} updates to background thread..."
         )
-        if update_data:
-            t_update = None
-            if tracker_type == "mini":
-                t_update = create_mini_tracker_update(
-                    output_file=update_data["output_file"],
-                    key_info_list=update_data["key_info_list"],
-                    grid_rows=update_data["grid_rows"],
-                    last_key_edit=update_data["last_key_edit"],
-                    last_grid_edit=update_data["last_grid_edit"],
-                    module_path=update_data["module_path"],
-                    path_to_key_info=update_data["path_to_key_info"],
-                    existing_lines=update_data["existing_lines"],
-                    tracker_exists=update_data["tracker_exists"],
-                )
-            elif tracker_type == "doc":
-                t_update = create_doc_tracker_update(
-                    output_file=update_data["output_file"],
-                    key_info_list=update_data["key_info_list"],
-                    grid_rows=update_data["grid_rows"],
-                    last_key_edit=update_data["last_key_edit"],
-                    last_grid_edit=update_data["last_grid_edit"],
-                    path_to_key_info=update_data["path_to_key_info"],
-                )
-            else:  # main
-                t_update = create_main_tracker_update(
-                    output_file=update_data["output_file"],
-                    key_info_list=update_data["key_info_list"],
-                    grid_rows=update_data["grid_rows"],
-                    last_key_edit=update_data["last_key_edit"],
-                    last_grid_edit=update_data["last_grid_edit"],
-                    path_to_key_info=update_data["path_to_key_info"],
-                )
+        suggestions_copy = {k: v[:] for k, v in batch_suggestions.items()}
+        future = commit_executor.submit(
+            background_commit, tracker_path, global_map, tracker_type, suggestions_copy
+        )
+        commit_futures.append(future)
 
-            if t_update:
-                collector.add(t_update)
-                collector.commit_all()
+    if commit_futures:
+        print(f"Waiting for {len(commit_futures)} background commits to complete...")
+        for future in concurrent.futures.as_completed(commit_futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error in background commit: {e}")
+                logger.error(f"Error in background commit: {e}", exc_info=True)
+
+    commit_executor.shutdown()
 
     elapsed = time.time() - start_time
     print(
