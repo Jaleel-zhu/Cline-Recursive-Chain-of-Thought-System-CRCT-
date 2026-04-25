@@ -3,3 +3,9 @@
 *venv*
 *embeddings*
 .kilocodemodes
+docs/ARCHITECTURE_AND_STRUCTURE.md
+docs/audit.md
+docs/MODULE_REFERENCE.md
+docs/performance_analysis.md
+docs/PROJECT_OVERVIEW.md
+docs/USAGE_AND_SETUP.md

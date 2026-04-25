@@ -149,10 +149,7 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │   .clinerules/
 │   .clinerules.config.json       # Configuration for dependency system
 │   .gitignore
-│   CHANGELOG.md                  # Version history <NEW in v8.0>
-│   INSTRUCTIONS.md
 │   LICENSE
-│   MIGRATION_v7.x_to_v8.0.md     # Upgrade guide <NEW in v8.0>
 │   README.md
 │   requirements.txt
 │
@@ -162,8 +159,14 @@ Cline-Recursive-Chain-of-Thought-System-CRCT-/
 │   │  userProfile.md             # User profile and preferences
 │   │  progress.md                # High-level project checklist
 │   │
-│   ├──backups/                   # Backups of tracker files
-│   ├──dependency_diagrams/       # Default location for auto-generated Mermaid diagrams <NEW>
+│   ├──backups/                   # Tracker backups
+│   ├──CRCT_Documentation/        # Detailed v8.x Tech Guides <NEW>
+│   │    CHANGELOG.md             # Detailed version history
+│   │    SES_ARCHITECTURE.md      # Embedding system deep-dive
+│   │    Cache_System_Documentation.md
+│   │    MIGRATION_v7.x_to_v8.0.md
+│   │    ...
+│   ├──dependency_diagrams/       # Auto-generated diagrams
 │   ├──prompts/                   # System prompts and plugins
 │   │    core_prompt.md           # Core system instructions
 |   |    cleanup_consolidation_plugin.md <NEWer>
