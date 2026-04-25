@@ -13,7 +13,7 @@ import os
 import re
 import shutil  # Added for renaming
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
 from cline_utils.dependency_system.utils.config_manager import ConfigManager
 from cline_utils.dependency_system.utils.path_utils import (
@@ -414,13 +414,6 @@ def generate_keys(
                         if current_dir_key_info
                         else None
                     )
-                    # Check if the *parent directory* being processed is represented by a subdir key
-                    is_parent_dir_a_subdir = bool(
-                        parent_key_string
-                        and re.match(r"^[1-9]\d*[A-Z][a-z]$", parent_key_string)
-                    )
-
-                    # <<< CORRECTED PROMOTION TRIGGER >>>
                     needs_promotion = is_parent_key_a_subdir and is_dir
 
                     if needs_promotion:
@@ -581,134 +574,22 @@ def generate_keys(
                 raise dir_err
 
     # --- Main Loop ---
-    for root_path in root_paths:
+    # Sort root_paths so top-level letter assignments (A, B, C...) are
+    # deterministic regardless of the order the caller supplies them.
+    for root_path in sorted(root_paths):
         process_directory(root_path, exclusion_set_for_processing, parent_info=None)
 
     # Ensure the returned list contains unique KeyInfo objects (in case of reprocessing/overlaps)
     # Using dict.fromkeys preserves order (Python 3.7+) and ensures uniqueness based on KeyInfo equality
     # Note: KeyInfo is a tuple, so equality works as expected.
-    # --- Apply global instance suffixes (#GI) to duplicate base keys before saving ---
-    # Predeclare for type checkers
+    #
+    # NOTE: GI disambiguation is done once in the save block below via _apply_global_instance_suffixes.
+    # A former inline first-pass block was removed because it duplicated that logic while loading
+    # a stale old map (before the rename) and competed with the authoritative pass below.
+
+    # --- Apply GLOBAL INSTANCE disambiguation and save ---
     current_map_path: str = ""
     try:
-        # Establish paths early for exception handlers in this block
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        current_map_path = normalize_path(
-            os.path.join(script_dir, GLOBAL_KEY_MAP_FILENAME)
-        )
-        old_map_path = normalize_path(
-            os.path.join(script_dir, OLD_GLOBAL_KEY_MAP_FILENAME)
-        )
-
-        # Helper: strip any existing instance suffix to get base key
-        def _strip_instance_suffix(k: str) -> str:
-            return k.split("#", 1)[0]
-
-        # Load previous map (if any) to stabilize instance numbers across runs
-        prev_map = load_old_global_key_map() or {}
-
-        # Build base_key -> list[KeyInfo] buckets
-        base_key_to_infos: Dict[str, List[KeyInfo]] = {}
-        for ki in path_to_key_info.values():
-            base_key = _strip_instance_suffix(ki.key_string)
-            base_key_to_infos.setdefault(base_key, []).append(ki)
-
-        # Build a quick lookup of previous instance numbers by normalized path (prev path -> prev instance int)
-        prev_instance_by_path: Dict[str, int] = {}
-        for p_path, p_info in prev_map.items():
-            # p_info.key_string may already contain #n; if not, treat as base-only (no instance)
-            k = p_info.key_string
-            if "#" in k:
-                try:
-                    prev_instance_by_path[p_path] = int(k.split("#", 1)[1])
-                except ValueError:
-                    # Ignore malformed old instance strings; they'll be reassigned deterministically
-                    continue
-
-        # For each base key with duplicates, assign/reuse #GI in a stable manner
-        updated_path_to_key_info: Dict[str, KeyInfo] = {}
-        for base_key, infos in base_key_to_infos.items():
-            if len(infos) == 1:
-                # Unique globally: ensure no suffix remains
-                ki = infos[0]
-                if "#" in ki.key_string:
-                    new_key_str = base_key
-                    updated_path_to_key_info[ki.norm_path] = KeyInfo(
-                        new_key_str,
-                        ki.norm_path,
-                        ki.parent_path,
-                        ki.tier,
-                        ki.is_directory,
-                    )
-                else:
-                    updated_path_to_key_info[ki.norm_path] = ki
-                continue
-
-            # Duplicates exist: assign instance numbers
-            # Sort deterministically by norm_path for any new assignments
-            infos_sorted = sorted(infos, key=lambda _ki: _ki.norm_path)
-
-            # First pass: try to reuse previous numbers
-            assigned_numbers: Dict[str, int] = {}  # norm_path -> instance number
-            used_numbers: Set[int] = set()
-            for ki in infos_sorted:
-                prev_num = prev_instance_by_path.get(ki.norm_path)
-                if prev_num and prev_num not in used_numbers:
-                    assigned_numbers[ki.norm_path] = prev_num
-                    used_numbers.add(prev_num)
-
-            # Second pass: assign remaining numbers starting from 1 upward
-            next_num = 1
-            for ki in infos_sorted:
-                if ki.norm_path in assigned_numbers:
-                    continue
-                # find next available number
-                while next_num in used_numbers:
-                    next_num += 1
-                assigned_numbers[ki.norm_path] = next_num
-                used_numbers.add(next_num)
-                next_num += 1
-
-            # Write updated KeyInfo with KEY#GI
-            for ki in infos_sorted:
-                gi = assigned_numbers[ki.norm_path]
-                new_key_str = f"{base_key}#{gi}"
-                updated_path_to_key_info[ki.norm_path] = KeyInfo(
-                    new_key_str, ki.norm_path, ki.parent_path, ki.tier, ki.is_directory
-                )
-
-        # Merge back any unique (non-duplicate) entries that weren't processed above
-        for norm_path, ki in path_to_key_info.items():
-            if norm_path not in updated_path_to_key_info:
-                base_key = _strip_instance_suffix(ki.key_string)
-                # Ensure unique stays unsuffixed
-                if "#" in ki.key_string:
-                    updated_path_to_key_info[norm_path] = KeyInfo(
-                        base_key, ki.norm_path, ki.parent_path, ki.tier, ki.is_directory
-                    )
-                else:
-                    updated_path_to_key_info[norm_path] = ki
-
-        # Replace in-memory map
-        path_to_key_info = updated_path_to_key_info
-    except IOError as e:
-        logger.error(
-            f"I/O Error preparing global key map prior to save at {current_map_path}: {e}",
-            exc_info=True,
-        )
-        # Decide if this should be a critical failure or just a warning
-        raise KeyGenerationError(
-            f"Failed to prepare global key map for save: {e}"
-        ) from e
-
-    # --- Apply GLOBAL INSTANCE disambiguation before saving ---
-    try:
-        # Load previous map for stable instance reuse
-        previous_map = load_old_global_key_map()
-        path_to_key_info = _apply_global_instance_suffixes(
-            path_to_key_info, previous_map
-        )
-
         # Get the directory where this script (key_manager.py) resides
         script_dir = os.path.dirname(os.path.abspath(__file__))
         current_map_path = normalize_path(
@@ -719,10 +600,27 @@ def generate_keys(
         )
         os.makedirs(script_dir, exist_ok=True)  # Ensure directory exists
 
-        # Step 1: Rename current to old (overwrite existing old if present)
+        # Step 1: Load the PREVIOUS map BEFORE renaming so we read the right file.
+        # (shutil.move overwrites old_map_path, so reading after the rename would
+        # give us the map from two runs ago rather than the immediately prior run.)
+        previous_map: Optional[Dict[str, KeyInfo]] = None
+        try:
+            previous_map = load_old_global_key_map()
+        except Exception as _e_load_old:
+            previous_map = None
+            logger.warning(
+                f"Could not load previous global key map for GI stabilization: {_e_load_old}"
+            )
+
+        # Step 2: Apply GI suffixes for duplicated base keys, reusing prior assignments.
+        # This is the single authoritative call; the return value replaces the in-memory map.
+        path_to_key_info = _apply_global_instance_suffixes(
+            path_to_key_info, previous_map
+        )
+
+        # Step 3: Rotate the on-disk maps: current → old.
         if os.path.exists(current_map_path):
             try:
-                # Use shutil.move for atomic rename where possible, handles overwrite
                 shutil.move(current_map_path, old_map_path)
                 logger.info(
                     f"Renamed existing '{GLOBAL_KEY_MAP_FILENAME}' to '{OLD_GLOBAL_KEY_MAP_FILENAME}'."
@@ -734,20 +632,7 @@ def generate_keys(
         else:
             logger.info(f"No existing '{GLOBAL_KEY_MAP_FILENAME}' found to rename.")
 
-        # Step 1.5: Load previous map (if any) to stabilize instance numbering
-        previous_map: Optional[Dict[str, KeyInfo]] = None
-        try:
-            previous_map = load_old_global_key_map()
-        except Exception as _e_load_old:
-            previous_map = None
-            logger.warning(
-                f"Could not load previous global key map for GI stabilization: {_e_load_old}"
-            )
-
-        # Step 2: Apply GI suffixes for duplicated base keys, reusing prior assignments
-        _apply_global_instance_suffixes(path_to_key_info, previous_map)
-
-        # Step 3: Save the newly generated map to the current filename
+        # Step 4: Save the newly generated map to the current filename.
         serializable_map = {
             path: info._asdict() for path, info in path_to_key_info.items()
         }
@@ -758,7 +643,6 @@ def generate_keys(
         logger.error(
             f"I/O Error saving global key map to {current_map_path}: {e}", exc_info=True
         )
-        # Decide if this should be a critical failure or just a warning
         raise KeyGenerationError(f"Failed to save global key map: {e}") from e
     except Exception as e:
         logger.exception(
@@ -887,7 +771,12 @@ def load_tracker_map() -> List[str]:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return data
+                    data_list = cast(List[object], data)
+                    result: List[str] = []
+                    for item in data_list:
+                        if isinstance(item, str):
+                            result.append(item)
+                    return result
                 logger.warning(
                     f"Tracker map data in {path} is not a list. Returning empty."
                 )
@@ -999,8 +888,19 @@ def get_key_from_path(path: str, path_to_key_info: Dict[str, KeyInfo]) -> Option
 
 def get_sortable_parts_for_key(key_str: str) -> List[Union[str, int]]:
     """
-    Splits a key string into parts and converts numeric parts to integers
-    for hierarchical/natural sorting.
+    Single source of truth for key sort ordering.
+
+    Splits a key string into alternating int/str tokens for natural-sort
+    comparison.  Because the tier is always the leading numeric token
+    (e.g. ``1`` in ``1Ab3``), sorting by these tokens already sorts by
+    tier first, then directory letter, then subdir letter, then file
+    number — no separate tier field is ever required.
+
+    Args:
+        key_str: A key string such as ``1Ab3`` or ``2A#1``.
+
+    Returns:
+        A list of ``int`` and ``str`` tokens suitable as a ``sorted()`` key.
     """
     if not key_str:
         return []
@@ -1022,72 +922,18 @@ def sort_key_strings_hierarchically(keys: List[str]) -> List[str]:
     Sorts a list of key strings hierarchically (natural sort order).
     e.g., 1A1, 1A2, 1A10 instead of 1A1, 1A10, 1A2.
 
+    Delegates to :func:`get_sortable_parts_for_key` — the single source of
+    truth for ordering logic.  ``None`` and empty-string entries are silently
+    dropped.
+
     Args:
         keys: A list of key strings.
 
     Returns:
-        A new list containing the sorted key strings.
+        A new list containing the valid key strings in sorted order.
     """
-
-    def sort_key_func(key_str: str) -> List[Union[str, int]]:
-        if not key_str:
-            return []  # Handle invalid input
-        parts = re.findall(KEY_PATTERN, key_str)
-        # Convert numeric parts to integers for correct numerical sorting
-        try:
-            # Ensure tier (first part if numeric) is handled correctly
-            # The pattern splits correctly, just need conversion
-            converted_parts: List[Union[str, int]] = [
-                (int(p) if p.isdigit() else p) for p in parts
-            ]
-        except (ValueError, TypeError):
-            logger.warning(
-                f"Could not convert parts for sorting key string '{key_str}', using basic string sort."
-            )
-            converted_parts = parts  # Fallback
-        # Return tuple for sorting (implicitly handles tier first if pattern is correct)
-        return converted_parts
-
-    # Filter out potential None or non-string elements before sorting
     valid_keys = [k for k in keys if k]
-    return sorted(valid_keys, key=get_sortable_parts_for_key)  # Use the new helper
-
-
-# --- Modify sort_keys to be explicit about KeyInfo ---
-# Rename original sort_keys to avoid confusion if needed, or keep as is
-# Let's keep it named sort_keys but it strictly takes List[KeyInfo] now
-def sort_keys(key_info_list: List[KeyInfo]) -> List[KeyInfo]:
-    """
-    Sort a list of KeyInfo objects based primarily on tier, then natural sort of key string.
-
-    Args:
-        key_info_list: List of KeyInfo objects to sort.
-
-    Returns:
-        Sorted list of KeyInfo objects.
-    """
-
-    def sort_key_func(key_info: KeyInfo):
-        # Handle potential None values if list source isn't guaranteed clean
-        if key_info is None or not hasattr(key_info, "key_string"):
-            return (float("inf"), [])
-
-        key = key_info.key_string
-        parts = re.findall(KEY_PATTERN, key)
-        # Convert numeric parts to integers for correct numerical sorting
-        try:
-            converted_parts = [(int(p) if p.isdigit() else p) for p in parts]
-        except (ValueError, TypeError):
-            # Fallback if parts contain unexpected non-digit/non-alpha chars
-            logger.warning(
-                f"Could not convert parts for sorting key '{key}', using basic string sort."
-            )
-            converted_parts = parts  # Use original parts if conversion fails
-        # Return tuple: (tier, converted_parts) for primary sort by tier
-        return (key_info.tier, converted_parts)
-
-    # return sorted([ki for ki in key_info_list if ki is not None], key=sort_key_func)
-    return sorted(key_info_list, key=sort_key_func)
+    return sorted(valid_keys, key=get_sortable_parts_for_key)
 
 
 def regenerate_keys(
@@ -1118,6 +964,82 @@ def regenerate_keys(
     return generate_keys(
         root_paths, excluded_dirs, excluded_extensions, precomputed_excluded_paths
     )
+
+
+def build_keymap_indexes(global_map: Dict[str, KeyInfo]) -> Dict[str, Any]:
+    """
+    Builds derived indexes from the global key map for fast descendant and directory lookups.
+    """
+    children_by_parent: Dict[str, List[str]] = defaultdict(list)
+    is_dir_map: Dict[str, bool] = {}
+    path_meta: Dict[str, KeyInfo] = {}
+
+    for path, info in global_map.items():
+        is_dir_map[path] = info.is_directory
+        path_meta[path] = info
+        if info.parent_path:
+            children_by_parent[info.parent_path].append(path)
+
+    # Compute recursive file descendants
+    file_descendants_by_dir: Dict[str, Tuple[str, ...]] = {}
+
+    def get_file_descendants(dir_path: str) -> List[str]:
+        if dir_path in file_descendants_by_dir:
+            return list(file_descendants_by_dir[dir_path])
+
+        descendants: List[str] = []
+        for child in children_by_parent.get(dir_path, []):
+            if is_dir_map.get(child):
+                descendants.extend(get_file_descendants(child))
+            else:
+                descendants.append(child)
+
+        res: Tuple[str, ...] = tuple(sorted(list(set(descendants))))
+        file_descendants_by_dir[dir_path] = res
+        return list(res)
+
+    for path, info in global_map.items():
+        if info.is_directory:
+            get_file_descendants(path)
+
+    # Compute ancestor chains
+    ancestor_chain: Dict[str, Tuple[str, ...]] = {}
+    for path, info in global_map.items():
+        chain: List[str] = []
+        curr: Optional[str] = info.parent_path
+        while curr:
+            chain.append(curr)
+            curr_info = global_map.get(curr)
+            curr = curr_info.parent_path if curr_info else None
+        ancestor_chain[path] = tuple(chain)
+
+    return {
+        "is_dir_map": is_dir_map,
+        "path_meta": path_meta,
+        "children_by_parent": dict(children_by_parent),
+        "file_descendants_by_dir": file_descendants_by_dir,
+        "ancestor_chain": ancestor_chain,
+    }
+
+
+@cached(
+    "keymap_indexes",
+    key_func=lambda: f"keymap_indexes:{os.path.getmtime(os.path.join(os.path.dirname(os.path.abspath(__file__)), GLOBAL_KEY_MAP_FILENAME)) if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), GLOBAL_KEY_MAP_FILENAME)) else 0}",
+)
+def get_keymap_indexes() -> Dict[str, Any]:
+    """
+    Returns derived indexes for the global key map, cached based on the map file's mtime.
+    """
+    global_map = load_global_key_map()
+    if not global_map:
+        return {
+            "is_dir_map": {},
+            "path_meta": {},
+            "children_by_parent": {},
+            "file_descendants_by_dir": {},
+            "ancestor_chain": {},
+        }
+    return build_keymap_indexes(global_map)
 
 
 # EoF

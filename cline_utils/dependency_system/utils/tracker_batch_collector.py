@@ -37,6 +37,10 @@ class TrackerUpdate:
     tracker_exists: bool = False
     # Additional metadata for processing
     path_to_key_info: Optional[Dict[str, Any]] = None
+    # Change counters for reporting
+    ast_overrides_applied_count: int = 0
+    suggestion_applied_count: int = 0
+    structural_deps_applied_count: int = 0
 
     def __post_init__(self):
         """Validate the update data."""
@@ -79,6 +83,8 @@ class TrackerBatchCollector:
         self.pending_updates: List[TrackerUpdate] = []
         self._temp_backup_dir: Optional[str] = None
         self._backed_up_files: Set[str] = set()
+        self.highest_dependency_cache: Dict[Tuple[str, str], Tuple[str, Set[str]]] = {}
+        self.key_to_paths: Dict[str, Set[str]] = {}
         super().__init__()
 
     def add(self, update: TrackerUpdate) -> None:
@@ -95,9 +101,69 @@ class TrackerBatchCollector:
             raise ValueError("Cannot add None update to batch")
 
         self.pending_updates.append(update)
+        try:
+            from cline_utils.dependency_system.core.dependency_grid import (
+                decompress,
+                PLACEHOLDER_CHAR,
+                EMPTY_CHAR,
+            )
+            from cline_utils.dependency_system.utils.config_manager import ConfigManager
+
+            config = ConfigManager()
+            get_priority = config.get_char_priority
+
+            # Track all keys and their paths for scoping
+            if update.key_info_list:
+                for ki in update.key_info_list:
+                    if ki.key_string not in self.key_to_paths:
+                        self.key_to_paths[ki.key_string] = set()
+                    self.key_to_paths[ki.key_string].add(ki.norm_path)
+
+            if update.key_info_list and update.grid_rows:
+                for r_idx, r_ki in enumerate(update.key_info_list):
+                    try:
+                        decomp = list(decompress(update.grid_rows[r_idx]))
+                    except:
+                        continue
+                    for c_idx, c_ki in enumerate(update.key_info_list):
+                        if r_idx == c_idx or c_idx >= len(decomp):
+                            continue
+                        c_val = decomp[c_idx]
+                        if c_val not in (PLACEHOLDER_CHAR, EMPTY_CHAR):
+                            kp = (r_ki.key_string, c_ki.key_string)
+                            ex = self.highest_dependency_cache.get(
+                                kp, (PLACEHOLDER_CHAR, set())
+                            )
+
+                            # Use priority logic to decide if we should update the cache
+                            new_prio = get_priority(c_val)
+                            old_prio = get_priority(ex[0])
+
+                            should_update = new_prio > old_prio
+                            if (
+                                not should_update
+                                and c_val == "n"
+                                and ex[0] in (PLACEHOLDER_CHAR, "s", "S", EMPTY_CHAR)
+                            ):
+                                should_update = True
+                            if (
+                                not should_update
+                                and c_val in ("s", "S")
+                                and ex[0] in (PLACEHOLDER_CHAR, EMPTY_CHAR)
+                            ):
+                                should_update = True
+
+                            if should_update:
+                                self.highest_dependency_cache[kp] = (
+                                    c_val,
+                                    {update.output_file},
+                                )
+                            elif new_prio == old_prio and c_val == ex[0]:
+                                ex[1].add(update.output_file)
+        except Exception:
+            pass
         logger.debug(
-            f"Added {update.tracker_type} tracker update for "
-            f"{os.path.basename(update.output_file)}"
+            f"Added {update.tracker_type} tracker update for {os.path.basename(update.output_file)}"
         )
 
     def __len__(self) -> int:
@@ -115,8 +181,8 @@ class TrackerBatchCollector:
         Returns:
             Tuple of (is_valid, list_of_error_messages)
         """
-        errors = []
-        output_files = set()
+        errors: List[str] = []
+        output_files: Set[str] = set()
 
         for i, update in enumerate(self.pending_updates):
             # Check for duplicate output files
@@ -163,9 +229,10 @@ class TrackerBatchCollector:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        results = {}
+        results: Dict[str, bool] = {}
 
         try:
+            self._consolidate_grids()
             # Create backups for rollback capability
             self._create_backups()
 
@@ -190,6 +257,13 @@ class TrackerBatchCollector:
                     )
                     results[update.output_file] = False
                     raise  # Re-raise to trigger rollback
+
+            # Populate runtime aggregation cache before invalidating
+            from cline_utils.dependency_system.utils.tracker_utils import (
+                set_runtime_aggregation_cache,
+            )
+
+            set_runtime_aggregation_cache(self.highest_dependency_cache)
 
             # Invalidate caches once after all successful writes
             self._invalidate_caches()
@@ -255,6 +329,134 @@ class TrackerBatchCollector:
         logger.info(
             f"Rollback complete: {restored_count} restored, " f"{failed_count} failed"
         )
+
+    def _consolidate_grids(self) -> None:
+        if not getattr(self, "highest_dependency_cache", None):
+            return
+        logger.info(
+            f"Starting batch consolidation for {len(self.pending_updates)} trackers..."
+        )
+        try:
+            from cline_utils.dependency_system.core.dependency_grid import (
+                decompress,
+                compress,
+                PLACEHOLDER_CHAR,
+                EMPTY_CHAR,
+            )
+            from cline_utils.dependency_system.utils.config_manager import ConfigManager
+            from cline_utils.dependency_system.utils.path_utils import (
+                normalize_path,
+                is_subpath,
+            )
+            from cline_utils.dependency_system.utils.cache_manager import (
+                get_project_root_cached as get_project_root,
+            )
+
+            config = ConfigManager()
+            get_priority = config.get_char_priority
+            pr = get_project_root()
+            d_roots = {
+                normalize_path(os.path.join(pr, p))
+                for p in config.get_doc_directories()
+            }
+
+            def key_in_doc_root(key_str: str) -> bool:
+                paths = self.key_to_paths.get(key_str, set())
+                return any(
+                    any(
+                        is_subpath(normalize_path(p), d) or normalize_path(p) == d
+                        for d in d_roots
+                    )
+                    for p in paths
+                )
+
+            total_changes = 0
+            total_suggestions = 0
+            total_structural = 0
+            total_ast = 0
+
+            for u in self.pending_updates:
+                total_suggestions += getattr(u, "suggestion_applied_count", 0)
+                total_structural += getattr(u, "structural_deps_applied_count", 0)
+                total_ast += getattr(u, "ast_overrides_applied_count", 0)
+
+                if not u.grid_rows or not u.key_info_list:
+                    continue
+
+                new_rows: List[str] = []
+                tracker_changes = 0
+                for ri, rki in enumerate(u.key_info_list):
+                    try:
+                        dr = list(decompress(u.grid_rows[ri]))
+                    except:
+                        new_rows.append(u.grid_rows[ri])
+                        continue
+                    rc = False
+                    for ci, cki in enumerate(u.key_info_list):
+                        if ri == ci or ci >= len(dr):
+                            continue
+                        kp = (rki.key_string, cki.key_string)
+                        ac_entry = self.highest_dependency_cache.get(
+                            kp, (PLACEHOLDER_CHAR, set())
+                        )
+                        ac = ac_entry[0]
+
+                        # Doc Tracker Scoping: only consolidate if both keys have a doc presence
+                        if u.tracker_type == "doc":
+                            if not (
+                                key_in_doc_root(rki.key_string)
+                                and key_in_doc_root(cki.key_string)
+                            ):
+                                ac = PLACEHOLDER_CHAR
+
+                        cc = dr[ci]
+                        if ac != PLACEHOLDER_CHAR and ac != cc:
+                            try:
+                                ap, cp = get_priority(ac), get_priority(cc)
+                                su = ap > cp
+                                if (
+                                    not su
+                                    and ac == "n"
+                                    and cc in (PLACEHOLDER_CHAR, "s", "S", EMPTY_CHAR)
+                                ):
+                                    su = True
+                                if (
+                                    not su
+                                    and ac in ("s", "S")
+                                    and cc in (PLACEHOLDER_CHAR, EMPTY_CHAR)
+                                ):
+                                    su = True
+
+                                if su:
+                                    dr[ci] = ac
+                                    rc = True
+                                    tracker_changes += 1
+                            except:
+                                pass
+                    new_rows.append(compress("".join(dr)) if rc else u.grid_rows[ri])
+                u.grid_rows = new_rows
+                total_changes += tracker_changes
+                if tracker_changes > 0:
+                    logger.debug(
+                        f"Applied {tracker_changes} consolidation changes to {os.path.basename(u.output_file)}"
+                    )
+
+            summary_parts: List[str] = []
+            if total_changes > 0:
+                summary_parts.append(f"{total_changes} consolidation changes")
+            if total_suggestions > 0:
+                summary_parts.append(f"{total_suggestions} suggestions applied")
+            if total_structural > 0:
+                summary_parts.append(f"{total_structural} structural changes")
+            if total_ast > 0:
+                summary_parts.append(f"{total_ast} AST overrides")
+
+            summary_msg = "Batch consolidation complete. " + (
+                ", ".join(summary_parts) if summary_parts else "Total changes: 0"
+            )
+            logger.info(summary_msg)
+        except Exception as e:
+            logger.error(f"Batch consolidation error: {e}", exc_info=True)
 
     def _create_backups(self) -> None:
         """Create temporary backups of existing tracker files."""
@@ -354,7 +556,7 @@ class TrackerBatchCollector:
                 from collections import defaultdict
 
                 # Precompute global key counts
-                global_key_counts = defaultdict(int)
+                global_key_counts: Dict[str, int] = defaultdict(int)
                 if update.path_to_key_info:
                     for ki in update.path_to_key_info.values():
                         global_key_counts[ki.key_string] += 1
@@ -428,6 +630,9 @@ def create_mini_tracker_update(
     existing_lines: Optional[List[str]] = None,
     tracker_exists: bool = False,
     manual_foreign_pins: Optional[List[str]] = None,
+    ast_overrides_applied_count: int = 0,
+    suggestion_applied_count: int = 0,
+    structural_deps_applied_count: int = 0,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for a mini tracker.
@@ -443,6 +648,9 @@ def create_mini_tracker_update(
         existing_lines: Existing file content lines (for template preservation)
         tracker_exists: Whether the tracker file already exists
         manual_foreign_pins: Persisted manual foreign pins for mini-pruning
+        ast_overrides_applied_count: Count of AST overrides applied
+        suggestion_applied_count: Count of suggestions applied
+        structural_deps_applied_count: Count of structural dependencies applied
 
     Returns:
         TrackerUpdate object ready for batch collection
@@ -462,6 +670,9 @@ def create_mini_tracker_update(
         tracker_exists=tracker_exists,
         path_to_key_info=path_to_key_info,
         manual_foreign_pins=manual_foreign_pins,
+        ast_overrides_applied_count=ast_overrides_applied_count,
+        suggestion_applied_count=suggestion_applied_count,
+        structural_deps_applied_count=structural_deps_applied_count,
     )
 
 
@@ -472,6 +683,9 @@ def create_main_tracker_update(
     last_key_edit: str,
     last_grid_edit: str,
     path_to_key_info: Dict[str, Any],
+    ast_overrides_applied_count: int = 0,
+    suggestion_applied_count: int = 0,
+    structural_deps_applied_count: int = 0,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for the main tracker.
@@ -495,6 +709,9 @@ def create_main_tracker_update(
         last_key_edit=last_key_edit,
         last_grid_edit=last_grid_edit,
         path_to_key_info=path_to_key_info,
+        ast_overrides_applied_count=ast_overrides_applied_count,
+        suggestion_applied_count=suggestion_applied_count,
+        structural_deps_applied_count=structural_deps_applied_count,
     )
 
 
@@ -505,6 +722,9 @@ def create_doc_tracker_update(
     last_key_edit: str,
     last_grid_edit: str,
     path_to_key_info: Dict[str, Any],
+    ast_overrides_applied_count: int = 0,
+    suggestion_applied_count: int = 0,
+    structural_deps_applied_count: int = 0,
 ) -> TrackerUpdate:
     """
     Create a TrackerUpdate for the doc tracker.
@@ -528,4 +748,7 @@ def create_doc_tracker_update(
         last_key_edit=last_key_edit,
         last_grid_edit=last_grid_edit,
         path_to_key_info=path_to_key_info,
+        ast_overrides_applied_count=ast_overrides_applied_count,
+        suggestion_applied_count=suggestion_applied_count,
+        structural_deps_applied_count=structural_deps_applied_count,
     )

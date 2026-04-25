@@ -217,9 +217,6 @@ def aggregate_dependencies_contextual(
             mini_grid_key_strings = sort_key_strings_hierarchically(
                 list(mini_keys_defined.keys())
             )
-            # Note: If natural sort order (like key_manager.sort_keys) is TRULY needed
-            # for string keys here, a separate natural sort utility would be required.
-            # Standard sort is usually sufficient for grid consistency.
 
             key_string_to_idx_mini = {k: i for i, k in enumerate(mini_grid_key_strings)}
 

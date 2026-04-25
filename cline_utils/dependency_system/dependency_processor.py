@@ -41,6 +41,7 @@ from cline_utils.dependency_system.core.dependency_grid import (
 )
 from cline_utils.dependency_system.core.key_manager import (
     KeyInfo,
+    get_keymap_indexes,
     get_sortable_parts_for_key,
     load_global_key_map,
     load_old_global_key_map,
@@ -1931,7 +1932,9 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     if not hasattr(args, "_processed_pairs"):
         args._processed_pairs = set()
-    processed_pairs = cast(Set[Tuple[str, str, str, str]], args._processed_pairs)
+
+    _raw_pairs = getattr(args, "_processed_pairs")
+    processed_pairs = cast(Set[Tuple[str, str, str, str]], _raw_pairs)
 
     limit = args.limit
     dep_char = args.dep_char
@@ -2036,8 +2039,12 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
 
     model_path = args.model if args.model else "models/Qwen3-4B-Instruct-2507-Q8_0.gguf"
 
-    # Load Global Map
+    # Load Global Map and derived indexes
     global_map = _load_global_map_or_exit()
+    indexes = get_keymap_indexes()
+    is_dir_map = indexes.get("is_dir_map", {})
+    file_descendants_by_dir = indexes.get("file_descendants_by_dir", {})
+    ancestor_chain = indexes.get("ancestor_chain", {})
 
     # Determine Tracker Type matches handle_add_dependency logic
     is_mini = tracker_path.endswith("_module.md")
@@ -2112,7 +2119,14 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
     llm_tasks: List[Tuple[str, str, str, str]] = []
     for pair in tasks:
         _, sp, _, tp = pair
-        if os.path.isdir(sp) or os.path.isdir(tp):
+        spn = normalize_path(sp)
+        tpn = normalize_path(tp)
+
+        # Use indexed directory metadata for classification
+        s_is_dir = is_dir_map.get(spn, os.path.isdir(sp))
+        t_is_dir = is_dir_map.get(tpn, os.path.isdir(tp))
+
+        if s_is_dir or t_is_dir:
             algo_tasks.append(pair)
         else:
             llm_tasks.append(pair)
@@ -2167,28 +2181,39 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             sn: str = normalize_path(src_path)
             tn: str = normalize_path(tgt_path)
 
-            if sn == tn or sn.startswith(tn + os.sep) or tn.startswith(sn + os.sep):
-                print(
+            # Fast parent-child relation test using indexed ancestor chains
+            is_parent_child_rel = (
+                sn == tn
+                or sn in ancestor_chain.get(tn, ())
+                or tn in ancestor_chain.get(sn, ())
+            )
+
+            if is_parent_child_rel:
+                logger.info(
                     f"Algorithmically resolved {src_key} -> {tgt_key}: 'x' (Parent-Child relation)"
                 )
                 algo_suggestions[src_key].append((tgt_key, "x"))
                 continue
 
-            s_children: List[str] = [
-                k
-                for k, v in global_map.items()
-                if (k == sn or k.startswith(sn + os.sep)) and not v.is_directory
-            ]
-            t_children: List[str] = [
-                k
-                for k, v in global_map.items()
-                if (k == tn or k.startswith(tn + os.sep)) and not v.is_directory
-            ]
+            # Fast descendant lookup using indexed structures
+            s_children_tuple = file_descendants_by_dir.get(sn)
+            if s_children_tuple is not None:
+                s_children = list(s_children_tuple)
+            else:
+                # If not a directory in index, treat as file if it's in the map or on disk
+                if not is_dir_map.get(sn, os.path.isdir(src_path)):
+                    s_children = [sn]
+                else:
+                    s_children = []
 
-            if not s_children and os.path.isfile(sn):
-                s_children = [sn]
-            if not t_children and os.path.isfile(tn):
-                t_children = [tn]
+            t_children_tuple = file_descendants_by_dir.get(tn)
+            if t_children_tuple is not None:
+                t_children = list(t_children_tuple)
+            else:
+                if not is_dir_map.get(tn, os.path.isdir(tgt_path)):
+                    t_children = [tn]
+                else:
+                    t_children = []
 
             best_char: str = " "
             best_prio: int = -1
@@ -2207,12 +2232,12 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
             if best_prio > -1:
                 if {"<", ">"} <= found_chars:
                     best_char = "x"
-                print(
+                logger.info(
                     f"Algorithmically resolved {src_key} -> {tgt_key}: '{best_char}' (Rolled up)"
                 )
                 algo_suggestions[src_key].append((tgt_key, best_char))
             else:
-                print(
+                logger.info(
                     f"Algorithmically resolved {src_key} -> {tgt_key}: 'n' (No dependencies found)"
                 )
                 algo_suggestions[src_key].append((tgt_key, "n"))
@@ -2242,6 +2267,15 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         path_to_key_info=update_data["path_to_key_info"],
                         existing_lines=update_data["existing_lines"],
                         tracker_exists=update_data["tracker_exists"],
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
+                        ),
                     )
                 elif tracker_type == "doc":
                     t_update = create_doc_tracker_update(
@@ -2250,7 +2284,16 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         grid_rows=update_data["grid_rows"],
                         last_key_edit=update_data["last_key_edit"],
                         last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=global_map,
+                        path_to_key_info=update_data["path_to_key_info"],
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
+                        ),
                     )
                 else:
                     t_update = create_main_tracker_update(
@@ -2259,7 +2302,16 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         grid_rows=update_data["grid_rows"],
                         last_key_edit=update_data["last_key_edit"],
                         last_grid_edit=update_data["last_grid_edit"],
-                        path_to_key_info=global_map,
+                        path_to_key_info=update_data["path_to_key_info"],
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
+                        ),
                     )
                 if t_update:
                     algo_collector.add(t_update)
@@ -2358,6 +2410,15 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         ),
                         existing_lines=update_data.get("existing_lines", []),
                         tracker_exists=update_data.get("tracker_exists", False),
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
+                        ),
                     )
                 elif b_tracker_type == "doc":
                     t_update = create_doc_tracker_update(
@@ -2369,6 +2430,15 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         path_to_key_info=update_data.get(
                             "path_to_key_info", b_path_to_key_info
                         ),
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
+                        ),
                     )
                 else:  # main
                     t_update = create_main_tracker_update(
@@ -2379,6 +2449,15 @@ def handle_resolve_placeholders(args: argparse.Namespace) -> int:
                         last_grid_edit=update_data["last_grid_edit"],
                         path_to_key_info=update_data.get(
                             "path_to_key_info", b_path_to_key_info
+                        ),
+                        ast_overrides_applied_count=update_data.get(
+                            "ast_overrides_applied_count", 0
+                        ),
+                        suggestion_applied_count=update_data.get(
+                            "suggestion_applied_count", 0
+                        ),
+                        structural_deps_applied_count=update_data.get(
+                            "structural_deps_applied_count", 0
                         ),
                     )
 

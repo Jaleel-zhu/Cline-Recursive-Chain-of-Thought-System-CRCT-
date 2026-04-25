@@ -1522,6 +1522,7 @@ def update_tracker(
     consolidation_changes_ct = 0
     # Structural dependency counters/flags
     structural_deps_applied_count = 0
+    suggestion_applied_count = 0
     grid_content_changed_by_structural = False
     # Overall metadata flags
     grid_structure_changed_flag = False  # Tracks if items added/removed or pruned
@@ -1540,8 +1541,23 @@ def update_tracker(
         global_key_counts_for_update_tracker[ki_global_counts.key_string] += 1
 
     # --- 1. Type-Specific Logic Block ---
+    initial_key_set_for_reporting: Set[Tuple[str, str]] = set()
     if tracker_type == "main":
         output_file = main_tracker_data["get_tracker_path"](project_root)
+
+        # [NEW] Capture initial key state for change reporting
+        initial_key_set_for_reporting: Set[Tuple[str, str]] = set()
+        if os.path.exists(output_file):
+            try:
+                with open(output_file, "r", encoding="utf-8") as f_init:
+                    _lines_init = f_init.readlines()
+                    _init_defs = read_key_definitions_from_lines(_lines_init)
+                    initial_key_set_for_reporting = {
+                        (k, normalize_path(p)) for k, p in _init_defs
+                    }
+            except Exception:
+                pass
+
         filtered_modules_map: Dict[str, KeyInfo] = main_tracker_data["key_filter"](
             project_root, path_to_key_info
         )
@@ -1627,6 +1643,20 @@ def update_tracker(
 
     elif tracker_type == "doc":
         output_file = doc_tracker_data["get_tracker_path"](project_root)
+
+        # [NEW] Capture initial key state for change reporting
+        initial_key_set_for_reporting: Set[Tuple[str, str]] = set()
+        if os.path.exists(output_file):
+            try:
+                with open(output_file, "r", encoding="utf-8") as f_init:
+                    _lines_init = f_init.readlines()
+                    _init_defs = read_key_definitions_from_lines(_lines_init)
+                    initial_key_set_for_reporting = {
+                        (k, normalize_path(p)) for k, p in _init_defs
+                    }
+            except Exception:
+                pass
+
         filtered_items_map: Dict[str, KeyInfo] = doc_tracker_data["file_inclusion"](
             project_root, path_to_key_info
         )
@@ -1678,6 +1708,19 @@ def update_tracker(
             return None
         try:
             output_file = get_mini_tracker_path(module_path_for_mini)
+
+            # [NEW] Capture initial key state for change reporting
+            initial_key_set_for_reporting: Set[Tuple[str, str]] = set()
+            if os.path.exists(output_file):
+                try:
+                    with open(output_file, "r", encoding="utf-8") as f_init:
+                        _lines_init = f_init.readlines()
+                        _init_defs = read_key_definitions_from_lines(_lines_init)
+                        initial_key_set_for_reporting = {
+                            (k, normalize_path(p)) for k, p in _init_defs
+                        }
+                except Exception:
+                    pass
         except ValueError as ve:
             logger.error(
                 f"Mini Update Critical: get_mini_tracker_path for '{module_path_for_mini}' fail: {ve}."
@@ -2548,6 +2591,7 @@ def update_tracker(
                             grid_content_changed_by_structural = True
                             structural_deps_applied_this_run += 1
         if structural_deps_applied_this_run > 0:
+            structural_deps_applied_count += structural_deps_applied_this_run
             logger.debug(
                 f"Applied {structural_deps_applied_this_run} structural dependency cells for '{output_file_basename}'."
             )
@@ -3004,6 +3048,7 @@ def update_tracker(
                         if temp_decomp_grid_rows[tgt_local_idx][src_local_idx] != "x":
                             temp_decomp_grid_rows[tgt_local_idx][src_local_idx] = "x"
                             suggestion_applied_flag = True
+                            suggestion_applied_count += 1
 
                 apply_this_suggestion_to_cell = False
                 if force_apply_suggestions:
@@ -3043,6 +3088,7 @@ def update_tracker(
                             tgt_local_idx
                         ] = final_char_to_set_in_grid
                         suggestion_applied_flag = True
+                        suggestion_applied_count += 1
                         logger.debug(
                             f"    Applied to grid (forward): {src_ki_in_this_tracker.norm_path} -> {tgt_ki_in_this_tracker.norm_path} = '{final_char_to_set_in_grid}'"
                         )
@@ -3143,147 +3189,7 @@ def update_tracker(
         if force_apply_suggestions and any_forced_suggestion_processed_for_metadata:
             suggestion_applied_flag = True  # Ensure timestamp update if any forced suggestion was processed, even if no grid character changed
 
-    # --- Final Grid Consolidation ---
-    consolidation_changes_ct = 0
-    if final_key_info_list:  # Only run if grid is not empty
-        logger.debug(
-            f"Consolidating grid for '{os.path.basename(output_file)}' against global highest-priority relationships..."
-        )
-        try:
-            all_tracker_paths_for_agg = find_all_tracker_paths(config, project_root)
-            if not all_tracker_paths_for_agg:
-                logger.warning(
-                    "Consolidation: No tracker paths found for aggregation. Skipping consolidation."
-                )
-            else:
-                # aggregate_all_dependencies expects path_migration_info, which should be available
-                # It returns Dict[Tuple[current_source_key_str, current_target_key_str], Tuple[char, Set[origin_paths]]]
-                globally_aggregated_links_with_origins = aggregate_all_dependencies(
-                    all_tracker_paths_for_agg,
-                    path_migration_info,
-                    path_to_key_info,
-                    show_progress=False,
-                )
-
-                global_authoritative_rels: Dict[Tuple[str, str], str] = {
-                    link_tuple: char_val
-                    for link_tuple, (
-                        char_val,
-                        _origins,
-                    ) in globally_aggregated_links_with_origins.items()
-                }
-
-                # DOC TRACKER CONSOLIDATION SCOPE
-                if tracker_type == "doc":
-                    logger.debug(
-                        f"Doc Tracker Consolidation: Scoping relationships to doc roots."
-                    )
-
-                    key_string_to_kis = defaultdict(list)
-                    for ki in path_to_key_info.values():
-                        key_string_to_kis[ki.key_string].append(ki)
-
-                    def key_in_doc_root(key_str: str) -> bool:
-                        kis = key_string_to_kis.get(key_str)
-                        if not kis:
-                            return False
-                        return any(
-                            is_path_in_doc_roots(ki.norm_path, abs_doc_roots_set)
-                            for ki in kis
-                        )
-
-                    scoped_rels = {
-                        (src_key, tgt_key): char
-                        for (
-                            src_key,
-                            tgt_key,
-                        ), char in global_authoritative_rels.items()
-                        if key_in_doc_root(src_key) and key_in_doc_root(tgt_key)
-                    }
-
-                    logger.debug(
-                        f"Scoped consolidation from {len(global_authoritative_rels)} to {len(scoped_rels)} relationships for doc_tracker."
-                    )
-                    global_authoritative_rels = scoped_rels
-
-                logger.debug(
-                    f"Retrieved {len(global_authoritative_rels)} globally authoritative relationships for consolidation."
-                )
-
-                # Iterate through the current temp_decomp_grid_rows using final_key_info_list
-                # which defines its structure. The key_strings in KeyInfo are global keys.
-                for r_idx, r_ki in enumerate(final_key_info_list):
-                    # r_ki.key_string is the current global key string for the row item
-                    for c_idx, c_ki in enumerate(final_key_info_list):
-                        if r_idx == c_idx:
-                            continue  # Skip diagonal
-
-                        # c_ki.key_string is the current global key string for the column item
-                        authoritative_char = global_authoritative_rels.get(
-                            (r_ki.key_string, c_ki.key_string), PLACEHOLDER_CHAR
-                        )
-                        current_char_in_grid = temp_decomp_grid_rows[r_idx][c_idx]
-
-                        if (
-                            authoritative_char != PLACEHOLDER_CHAR
-                        ):  # Global view has a defined non-'p' relationship
-                            try:
-                                auth_prio = get_priority(authoritative_char)
-                                curr_prio = get_priority(current_char_in_grid)
-
-                                # Update if authoritative is strictly higher priority
-                                should_update_consolidate = auth_prio > curr_prio
-                                # Also update if authoritative is 'n' (verified no dep) and current is overwritable ('p','s','S','.' EMPTY)
-                                if (
-                                    not should_update_consolidate
-                                    and authoritative_char == "n"
-                                    and current_char_in_grid
-                                    in (PLACEHOLDER_CHAR, "s", "S", EMPTY_CHAR)
-                                ):
-                                    should_update_consolidate = True
-                                # Also allow authoritative 's'/'S' to overwrite placeholders or empty
-                                if (
-                                    not should_update_consolidate
-                                    and authoritative_char in ("s", "S")
-                                    and current_char_in_grid
-                                    in (PLACEHOLDER_CHAR, EMPTY_CHAR)
-                                ):
-                                    should_update_consolidate = True
-
-                                if should_update_consolidate:
-                                    if (
-                                        temp_decomp_grid_rows[r_idx][c_idx]
-                                        != authoritative_char
-                                    ):
-                                        logger.debug(
-                                            f"  Consolidating '{r_ki.key_string}' -> '{c_ki.key_string}' (Paths: '{r_ki.norm_path}' -> '{c_ki.norm_path}'): From '{current_char_in_grid}' to '{authoritative_char}' based on global view."
-                                        )
-                                        temp_decomp_grid_rows[r_idx][
-                                            c_idx
-                                        ] = authoritative_char
-                                        consolidation_changes_ct += 1
-                            except KeyError as e_prio_consolidate:
-                                logger.warning(
-                                    f"  Consolidation: Priority lookup failed for char '{str(e_prio_consolidate)}' comparing {r_ki.key_string}->{c_ki.key_string}. Skipping cell."
-                                )
-
-                if consolidation_changes_ct > 0:
-                    logger.debug(
-                        f"Consolidation applied {consolidation_changes_ct} updates to '{os.path.basename(output_file)}' based on global relationships."
-                    )
-                else:
-                    logger.debug(
-                        f"No consolidation changes needed for '{os.path.basename(output_file)}' based on global relationships."
-                    )
-        except Exception as e_consolidation:
-            logger.error(
-                f"Error during grid consolidation for '{os.path.basename(output_file)}': {e_consolidation}",
-                exc_info=True,
-            )
-    else:
-        logger.info(
-            f"Skipping grid consolidation for '{os.path.basename(output_file)}' as its grid structure is empty."
-        )
+    # --- Final Grid Consolidation has been moved to TrackerBatchCollector._consolidate_grids() ---
 
     # --- Mini Tracker Foreign Key Pruning (MOVED TO RUN LATE) ---
     if (
@@ -3319,7 +3225,9 @@ def update_tracker(
             )
             internal_paths_for_pruning_set = {
                 p
-                for p in native_file_paths_for_pruning.union(native_dir_paths_for_pruning)
+                for p in native_file_paths_for_pruning.union(
+                    native_dir_paths_for_pruning
+                )
                 if p in valid_paths_for_pruning
             }
             paths_to_keep_after_pruning_set = internal_paths_for_pruning_set.copy()
@@ -3991,6 +3899,18 @@ def update_tracker(
     for ki_global_final_write in path_to_key_info.values():
         final_global_key_counts[ki_global_final_write.key_string] += 1
 
+    # --- Calculate Structural Key Changes ---
+    final_key_set_for_reporting = {
+        (ki.key_string, ki.norm_path) for ki in final_key_info_list
+    }
+    # Symmetric difference: items in one but not both (additions + removals)
+    key_delta_count = len(initial_key_set_for_reporting ^ final_key_set_for_reporting)
+    if key_delta_count > 0:
+        structural_deps_applied_count += key_delta_count
+        logger.debug(
+            f"Structural update for '{os.path.basename(output_file)}': {key_delta_count} key(s) added or removed."
+        )
+
     # --- Intercept for return_update mode ---
     if return_update:
         logger.debug(f"Returning prepared data for tracker: {output_file}")
@@ -4010,6 +3930,9 @@ def update_tracker(
             "manual_foreign_pins": (
                 sorted(manual_foreign_pins_set) if tracker_type == "mini" else []
             ),
+            "ast_overrides_applied_count": ast_overrides_applied_count,
+            "suggestion_applied_count": suggestion_applied_count,
+            "structural_deps_applied_count": structural_deps_applied_count,
         }
 
     if tracker_type == "mini":
