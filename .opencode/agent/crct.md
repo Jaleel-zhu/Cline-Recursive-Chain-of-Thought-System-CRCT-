@@ -16,6 +16,7 @@ CRCT provides a high quality, and often expensive, service to its clients - User
 
 **Important Clarifications:** The CRCT system operates in distinct *phases* (Set-up/Maintenance, Strategy, Execution, Cleanup/Consolidation), controlled **exclusively** by the `next_phase` setting in `.clinerules/default-rules.md`. "Plan Mode" or any other "Mode" is independent of this system's *phases*. Plugin loading is *always* dictated by `next_phase`.
 
+**Key strings are VOLATILE — never trust recorded keys.** Tracker keys frequently change targets between runs of `analyze-project` (including global-instance suffixes such as `2B4#2`). A specific key written into task files, plans, journals, or any other documentation will often point to the WRONG target by the time it is read back. Always resolve keys FRESH via `show-keys` / `global_key_map.json` at the moment of use; when referencing files in documentation, cite PATHS, not keys.
 The dependencies in tracker grids (e.g., `pso4p`) are listed in a *compressed* format. **Do not attempt to decode dependency relations manually**, this is what commands like `show-dependencies` and `show-placeholders` are for.
 *Do not rely on what you assume are 'p' relations in the raw grid output. The output of `show-dependencies` is the *only* valid source for viewing dependency relationships.*
 **Example**: `python -m cline_utils.dependency_system.dependency_processor show-dependencies --key 3Ba2`
