@@ -237,9 +237,10 @@ class TrackerBatchCollector:
                             continue
                         c_val = decomp[c_idx]
                         if c_val not in (PLACEHOLDER_CHAR, EMPTY_CHAR):
-                            kp = (r_ki.key_string, c_ki.key_string)
+                            kp_path = (r_ki.norm_path, c_ki.norm_path)
+                            kp_key = (r_ki.key_string, c_ki.key_string)
                             ex = self.highest_dependency_cache.get(
-                                kp, (PLACEHOLDER_CHAR, set())
+                                kp_path, self.highest_dependency_cache.get(kp_key, (PLACEHOLDER_CHAR, set()))
                             )
 
                             # Use priority logic to decide if we should update the cache
@@ -261,10 +262,9 @@ class TrackerBatchCollector:
                                 should_update = True
 
                             if should_update:
-                                self.highest_dependency_cache[kp] = (
-                                    c_val,
-                                    {update.output_file},
-                                )
+                                entry = (c_val, {update.output_file})
+                                self.highest_dependency_cache[kp_path] = entry
+                                self.highest_dependency_cache[kp_key] = entry
                             elif new_prio == old_prio and c_val == ex[0]:
                                 ex[1].add(update.output_file)
         except Exception:
@@ -580,10 +580,13 @@ class TrackerBatchCollector:
                     for ci, cki in enumerate(u.key_info_list):
                         if ri == ci or ci >= len(dr):
                             continue
-                        kp = (rki.key_string, cki.key_string)
-                        ac_entry = self.highest_dependency_cache.get(
-                            kp, (PLACEHOLDER_CHAR, set())
-                        )
+                        kp_path = (rki.norm_path, cki.norm_path)
+                        ac_entry = self.highest_dependency_cache.get(kp_path)
+                        if not ac_entry:
+                            kp_key = (rki.key_string, cki.key_string)
+                            ac_entry = self.highest_dependency_cache.get(
+                                kp_key, (PLACEHOLDER_CHAR, set())
+                            )
                         ac = ac_entry[0]
 
                         # Doc Tracker Scoping: only consolidate if both keys have a doc presence
@@ -996,20 +999,22 @@ class TrackerBatchCollector:
                 # KeyInfo objects from definitions
                 # (read_tracker_file_structured returns List[Tuple[key_str, path_str]])
                 # We need to resolve these to key_strings
-                for ri, (r_key, _) in enumerate(defs):
+                for ri, (_r_key, r_path) in enumerate(defs):
                     if ri >= len(rows):
                         break
                     try:
                         row_chars = list(decompress(rows[ri][1]))
                     except:
                         continue
+                    norm_r_path = normalize_path(r_path)
 
-                    for ci, (c_key, _) in enumerate(defs):
+                    for ci, (_c_key, c_path) in enumerate(defs):
                         if ri == ci or ci >= len(row_chars):
                             continue
                         char = row_chars[ci]
                         if char not in (PLACEHOLDER_CHAR, EMPTY_CHAR, DIAGONAL_CHAR):
-                            kp = (r_key, c_key)
+                            norm_c_path = normalize_path(c_path)
+                            kp = (norm_r_path, norm_c_path)
                             prio = get_priority(char)
                             existing = self.highest_dependency_cache.get(kp)
                             if existing is None or prio > get_priority(existing[0]):

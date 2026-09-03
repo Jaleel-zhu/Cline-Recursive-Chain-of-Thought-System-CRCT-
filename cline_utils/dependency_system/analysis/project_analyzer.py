@@ -22,6 +22,10 @@ from cline_utils.dependency_system.utils.batch_processor import (
     BatchProcessor,
     process_items,
 )
+from cline_utils.dependency_system.core.analysis_state_manager import (
+    AnalysisPhase,
+    AnalysisStateManager,
+)
 from cline_utils.dependency_system.utils.cache_manager import (
     cache_manager,
     clear_all_caches,
@@ -103,6 +107,11 @@ def analyze_project(
     if force_analysis:
         logger.info("Force analysis requested. Clearing all caches.")
         clear_all_caches()
+
+    state_mgr = AnalysisStateManager()
+    is_resuming, run_state = state_mgr.start_or_resume_run(
+        project_root, force=force_analysis
+    )
     analysis_results: Dict[str, Any] = {
         "status": "success",
         "message": "Analysis initiated.",
@@ -172,40 +181,72 @@ def analyze_project(
     # because the current map is renamed to the old map during key generation.
     has_old_map = False
 
-    # --- Key Generation ---
-    logger.info("Generating/Regenerating keys...")
+    # --- Key Generation & Resumption Check ---
     path_to_key_info: Dict[str, key_manager.KeyInfo] = {}
     newly_generated_keys: List[key_manager.KeyInfo] = []
-    try:
-        # Call generate_keys using the module reference
-        path_to_key_info, newly_generated_keys = key_manager.generate_keys(
-            all_roots_rel,  # Use this variable name
-            excluded_dirs=(set(excluded_dirs_rel)),
-            excluded_extensions=(set(excluded_extensions)),
-            precomputed_excluded_paths=all_excluded_paths_abs_set,
-            excluded_file_patterns=excluded_file_patterns_config,
+    should_reuse_keys = (
+        is_resuming
+        and run_state.get("phase")
+        in (
+            AnalysisPhase.KEYS_GENERATED.value,
+            AnalysisPhase.FILES_ANALYZED.value,
+            AnalysisPhase.SYMBOLS_MERGED.value,
+            AnalysisPhase.EMBEDDINGS_GENERATED.value,
+            AnalysisPhase.SUGGESTIONS_COMPLETED.value,
         )
-        analysis_results["key_generation"]["count"] = len(path_to_key_info)
-        analysis_results["key_generation"]["new_count"] = len(newly_generated_keys)
-        logger.info(
-            f"Generated {len(path_to_key_info)} keys for {len(path_to_key_info)} files/dirs."
-        )
-        if newly_generated_keys:
-            logger.info(f"Assigned {len(newly_generated_keys)} new keys.")
+    )
 
-        embedding_manager.total_files_to_rerank = len(
-            [ki for ki in path_to_key_info.values() if not ki.is_directory]
-        )
-    except key_manager.KeyGenerationError as kge:
-        analysis_results["status"] = "error"
-        analysis_results["message"] = f"Key generation failed: {kge}"
-        logger.critical(analysis_results["message"])
-        return analysis_results
-    except Exception as e:
-        analysis_results["status"] = "error"
-        analysis_results["message"] = f"Key generation failed unexpectedly: {e}"
-        logger.exception(analysis_results["message"])
-        return analysis_results
+    if should_reuse_keys:
+        logger.info("Resuming run: Loading existing global key map from previous run phase...")
+        loaded_keys = key_manager.load_global_key_map()
+        if loaded_keys:
+            path_to_key_info = loaded_keys
+            newly_generated_keys = []
+            analysis_results["key_generation"]["count"] = len(path_to_key_info)
+            analysis_results["key_generation"]["new_count"] = 0
+            embedding_manager.total_files_to_rerank = len(
+                [ki for ki in path_to_key_info.values() if not ki.is_directory]
+            )
+            logger.info(
+                f"Resumed with {len(path_to_key_info)} keys from in-progress run without re-rotating."
+            )
+        else:
+            should_reuse_keys = False
+
+    if not should_reuse_keys:
+        logger.info("Generating/Regenerating keys...")
+        try:
+            path_to_key_info, newly_generated_keys = key_manager.generate_keys(
+                all_roots_rel,
+                excluded_dirs=(set(excluded_dirs_rel)),
+                excluded_extensions=(set(excluded_extensions)),
+                precomputed_excluded_paths=all_excluded_paths_abs_set,
+                excluded_file_patterns=excluded_file_patterns_config,
+            )
+            analysis_results["key_generation"]["count"] = len(path_to_key_info)
+            analysis_results["key_generation"]["new_count"] = len(newly_generated_keys)
+            logger.info(
+                f"Generated {len(path_to_key_info)} keys for {len(path_to_key_info)} files/dirs."
+            )
+            if newly_generated_keys:
+                logger.info(f"Assigned {len(newly_generated_keys)} new keys.")
+
+            embedding_manager.total_files_to_rerank = len(
+                [ki for ki in path_to_key_info.values() if not ki.is_directory]
+            )
+            state_mgr.record_phase(
+                AnalysisPhase.KEYS_GENERATED, {"key_count": len(path_to_key_info)}
+            )
+        except key_manager.KeyGenerationError as kge:
+            analysis_results["status"] = "error"
+            analysis_results["message"] = f"Key generation failed: {kge}"
+            logger.critical(analysis_results["message"])
+            return analysis_results
+        except Exception as e:
+            analysis_results["status"] = "error"
+            analysis_results["message"] = f"Key generation failed unexpectedly: {e}"
+            logger.exception(analysis_results["message"])
+            return analysis_results
 
     # --- Build Path Migration Map (Early, after new keys are generated) ---
     logger.debug("Building path migration map for analysis and updates...")
@@ -366,6 +407,10 @@ def analyze_project(
     logger.info(
         f"File analysis complete. Analyzed: {analyzed_count}, Skipped: {skipped_count}, Errors: {error_count}"
     )
+    state_mgr.record_phase(
+        AnalysisPhase.FILES_ANALYZED,
+        {"analyzed": analyzed_count, "skipped": skipped_count, "errors": error_count},
+    )
 
     # --- NEW: Generate and Save Project Symbol Map ---
     logger.debug("Generating project symbol map...")
@@ -507,6 +552,7 @@ def analyze_project(
         analysis_results["symbol_map_generation"]["status"] = "error"
         analysis_results["symbol_map_generation"]["error_message"] = str(e)
     # --- END OF SYMBOL MAP MERGE ---
+    state_mgr.record_phase(AnalysisPhase.SYMBOLS_MERGED)
 
     # --- Create file_to_module mapping (Adapted for path_to_key_info) ---
     # Maps normalized absolute file path -> normalized absolute parent directory path (module path)
@@ -567,6 +613,7 @@ def analyze_project(
             logger.warning("Embedding generation failed or skipped for some paths.")
         else:
             logger.info("Embedding generation completed successfully.")
+        state_mgr.record_phase(AnalysisPhase.EMBEDDINGS_GENERATED)
     except Exception as e:
         analysis_results["embedding_generation"]["status"] = "error"
         analysis_results["status"] = (
@@ -715,6 +762,10 @@ def analyze_project(
     logger.info(
         f"Dependency suggestion complete. Generated {final_suggestion_count} total raw suggestions "
         + f"and {final_ast_link_count} AST-verified links from file analysis."
+    )
+    state_mgr.record_phase(
+        AnalysisPhase.SUGGESTIONS_COMPLETED,
+        {"raw_suggestions": final_suggestion_count, "ast_links": final_ast_link_count},
     )
 
     # --- NEW: Save all_project_ast_links to ast_verified_links.json ---
@@ -1297,6 +1348,7 @@ def analyze_project(
             config, project_root, force_scan=True
         )
         key_manager.save_tracker_map(list(current_tracker_paths))
+        state_mgr.mark_completed({"trackers_committed": len(batch_collector)})
     except Exception as e:
         logger.error(f"Failed to update persistent tracker map: {e}")
         # Not a fatal error for analysis, but good to log

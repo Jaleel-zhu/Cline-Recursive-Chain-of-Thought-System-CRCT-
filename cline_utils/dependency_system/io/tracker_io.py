@@ -2444,45 +2444,20 @@ def update_tracker(
                     # logger.debug(f"  Skip Row Migration: Path '{old_row_path_in_tracker_def}' (from old key '{old_row_label_in_file}') is unstable/removed globally.")
                     continue
 
-                new_global_key_for_row = migration_info_for_row_path[
-                    1
-                ]  # This is the CURRENT global key for old_row_path_in_tracker_def
-
-                # Find the KeyInfo object in the CURRENT global map (path_to_key_info) that corresponds to this new_global_key_for_row.
-                # The path of this KeyInfo might have changed if the item was renamed/moved but is logically the same.
-                current_row_ki = next(
-                    (
-                        ki
-                        for ki in path_to_key_info.values()
-                        if ki.key_string == new_global_key_for_row
-                        and ki.norm_path == old_row_path_in_tracker_def
-                    ),
-                    None,
-                )
-                if (
-                    not current_row_ki
-                ):  # Path might have changed for this key, or key was reused. Find any current path for this new_global_key.
-                    current_row_ki = next(
-                        (
-                            ki
-                            for ki in path_to_key_info.values()
-                            if ki.key_string == new_global_key_for_row
-                        ),
-                        None,
-                    )
-
-                if (
-                    not current_row_ki
-                ):  # Should not happen if new_global_key_for_row is not None
-                    skipped_instab_log += 1
-                    # logger.debug(f"  Skip Row Migration: Cannot map new global key '{new_global_key_for_row}' back to a current KeyInfo object.")
-                    continue
-
-                # Get the index of this row in the NEW grid structure (based on final_key_info_list)
-                new_final_row_idx = final_path_to_new_idx.get(current_row_ki.norm_path)
+                new_global_key_for_row = migration_info_for_row_path[1]
+                target_row_path = normalize_path(old_row_path_in_tracker_def)
+                new_final_row_idx = final_path_to_new_idx.get(target_row_path)
                 if new_final_row_idx is None:
-                    # This item (identified by its current path) is not part of the new tracker's structure.
-                    # logger.debug(f"  Skip Row Migration: Path '{current_row_ki.norm_path}' (new key '{new_global_key_for_row}') not in this tracker's final structure.")
+                    current_row_ki = path_to_key_info.get(target_row_path)
+                    if not current_row_ki and new_global_key_for_row:
+                        for p, ki in path_to_key_info.items():
+                            if ki.key_string == new_global_key_for_row and p in final_path_to_new_idx:
+                                current_row_ki = ki
+                                break
+                    if current_row_ki:
+                        new_final_row_idx = final_path_to_new_idx.get(current_row_ki.norm_path)
+
+                if new_final_row_idx is None:
                     continue
 
                 try:
@@ -2517,33 +2492,19 @@ def update_tracker(
                             # logger.debug(f"  Skip Cell Migration: Col Path '{old_col_path_in_tracker_def}' unstable/removed globally.")
                             continue
                         new_global_key_for_col = migration_info_for_col_path[1]
-
-                        current_col_ki = next(
-                            (
-                                ki
-                                for ki in path_to_key_info.values()
-                                if ki.key_string == new_global_key_for_col
-                                and ki.norm_path == old_col_path_in_tracker_def
-                            ),
-                            None,
-                        ) or next(
-                            (
-                                ki
-                                for ki in path_to_key_info.values()
-                                if ki.key_string == new_global_key_for_col
-                            ),
-                            None,
-                        )
-                        if not current_col_ki:
-                            skipped_instab_log += 1
-                            # logger.debug(f"  Skip Cell Migration: Cannot map new col global key '{new_global_key_for_col}' to current KeyInfo.")
-                            continue
-
-                        new_final_col_idx = final_path_to_new_idx.get(
-                            current_col_ki.norm_path
-                        )
+                        target_col_path = normalize_path(old_col_path_in_tracker_def)
+                        new_final_col_idx = final_path_to_new_idx.get(target_col_path)
                         if new_final_col_idx is None:
-                            # logger.debug(f"  Skip Cell Migration: Col Path '{current_col_ki.norm_path}' (new key '{new_global_key_for_col}') not in this tracker's final structure.")
+                            current_col_ki = path_to_key_info.get(target_col_path)
+                            if not current_col_ki and new_global_key_for_col:
+                                for p, ki in path_to_key_info.items():
+                                    if ki.key_string == new_global_key_for_col and p in final_path_to_new_idx:
+                                        current_col_ki = ki
+                                        break
+                            if current_col_ki:
+                                new_final_col_idx = final_path_to_new_idx.get(current_col_ki.norm_path)
+
+                        if new_final_col_idx is None:
                             continue
 
                         # Check bounds for temp_decomp_grid_rows (should be new_grid_item_count x new_grid_item_count)

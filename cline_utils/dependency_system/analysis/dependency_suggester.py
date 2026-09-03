@@ -15,10 +15,10 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 
-def _has_method(methods: List[Dict[str, Any]], member_name: str) -> bool:
+def _has_method(methods: List[Any], member_name: str) -> bool:
     """Fast lookup for method names in a list of dicts without creating generators."""
     for m in methods:
-        if isinstance(m, dict) and m.get("name") == member_name:
+        if isinstance(m, dict) and cast(Dict[str, Any], m).get("name") == member_name:
             return True
     return False
 
@@ -61,10 +61,11 @@ def strip_json_comments(json_str: str) -> str:
     """
     pattern = r'("(?:\\.|[^"\\])*")|(/\*.*?\*/)|(//[^\r\n]*)'
 
-    def replacer(match):
+    def replacer(match: re.Match[str]) -> str:
         # If it matches a string literal, preserve it
-        if match.group(1) is not None:
-            return match.group(1)
+        g1 = match.group(1)
+        if g1 is not None:
+            return g1
         # Otherwise, it's a comment; discard it
         return ""
 
@@ -282,12 +283,19 @@ def should_skip_suggestion(
 
     source_path = normalize_path(source_path)
     target_path = normalize_path(target_path)
+
+    # Primary check: Path-based lookup
+    for path_pair in ((source_path, target_path), (target_path, source_path)):
+        res = existing_state.get(path_pair)
+        if res and res[0] in ("x", "n"):
+            return True
+
+    # Secondary check: Fallback to Key#GI lookup for compatibility
     src_ki = path_to_key_info.get(source_path)
     tgt_ki = path_to_key_info.get(target_path)
     if not src_ki or not tgt_ki:
         return False
 
-    # Resolve to KEY#GI strings for state lookup
     src_key_gi = get_key_global_instance_string(src_ki, path_to_key_info)
     tgt_key_gi = get_key_global_instance_string(tgt_ki, path_to_key_info)
 
@@ -560,7 +568,7 @@ def _verify_class_member(
 
 
 def _has_symbol_name(
-    module_symbols: Dict[str, Any],
+    module_symbols: Optional[Dict[str, Any]],
     symbol_name: str,
     keys: Optional[List[str]] = None,
 ) -> bool:
@@ -573,7 +581,7 @@ def _has_symbol_name(
     - Str items: Simple symbol names or exports (e.g., JavaScript/TypeScript raw string
       exports or globals_defined) represented as plain strings.
     """
-    if not isinstance(module_symbols, dict):
+    if not module_symbols or not isinstance(module_symbols, dict):
         return False
     keys_to_check = (
         keys
@@ -582,11 +590,11 @@ def _has_symbol_name(
     )
     for s_key in keys_to_check:
         symbol_list = module_symbols.get(s_key)
-        if symbol_list:
+        if symbol_list and isinstance(symbol_list, list):
             for s_item in symbol_list:
                 # Python symbols are typically parsed as dictionaries with a "name" key.
                 if isinstance(s_item, dict):
-                    if s_item.get("name") == symbol_name:
+                    if cast(Dict[str, Any], s_item).get("name") == symbol_name:
                         return True
                 # JS/TS exports or other simplified symbols are represented directly as strings.
                 elif isinstance(s_item, str):

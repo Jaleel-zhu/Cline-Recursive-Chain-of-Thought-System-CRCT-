@@ -43,6 +43,25 @@ _core_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
 REGISTRY_PATH = resolve_state_path("transparency_registry.json", _core_dir)
 
 
+def _load_symbol_map_for_transparency() -> Dict[str, Dict[str, Any]]:
+    """Load symbol map data without importing analysis modules to prevent import cycles."""
+    try:
+        from cline_utils.dependency_system.utils.cache_manager import cache_manager
+
+        cached_map = cache_manager.get_cache("project_symbol_map_data")
+        if isinstance(cached_map, dict):
+            return cached_map
+        map_path = resolve_state_path("project_symbol_map.json", _core_dir)
+        if os.path.exists(map_path):
+            with open(map_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.debug(f"Could not load project symbol map in transparency_manager: {e}")
+    return {}
+
+
 def _coerce_line(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -617,17 +636,7 @@ class TransparencyManager:
                 comments_removed = 0
 
                 # Pre-load symbol map to check active symbols
-                symbol_map = {}
-                try:
-                    from cline_utils.dependency_system.analysis.dependency_suggester import (
-                        load_project_symbol_map,
-                    )
-
-                    symbol_map = load_project_symbol_map()
-                except Exception as e:
-                    logger.debug(
-                        f"Could not load project symbol map in virtualize_connection_maps: {e}"
-                    )
+                symbol_map = _load_symbol_map_for_transparency()
 
                 active_symbols = set()
                 has_symbol_data = False

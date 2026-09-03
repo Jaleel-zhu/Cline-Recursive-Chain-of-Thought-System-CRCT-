@@ -536,26 +536,21 @@ def aggregate_all_dependencies(
         # Build ordered KIs for this tracker
         effective_ki_list_for_this_tracker: List[Optional[KeyInfo]] = []
         for _key_in_file, path_in_file in definitions_ordered_from_file:
-            mig_info = path_migration_info.get(path_in_file)
-            resolved_ki_for_this_def_entry: Optional[KeyInfo] = None
-            if mig_info and mig_info[1]:  # has a current global base key
-                new_global_base_key = mig_info[1]
-                resolved_ki_for_this_def_entry = next(
-                    (
-                        ki
-                        for ki in current_global_path_to_key_info.values()
-                        if ki.key_string == new_global_base_key
-                        and ki.norm_path == path_in_file
-                    ),
-                    None,
-                ) or next(
-                    (
-                        ki
-                        for ki in current_global_path_to_key_info.values()
-                        if ki.key_string == new_global_base_key
-                    ),
-                    None,
-                )
+            norm_p = normalize_path(path_in_file)
+            resolved_ki_for_this_def_entry: Optional[KeyInfo] = current_global_path_to_key_info.get(norm_p)
+            if not resolved_ki_for_this_def_entry:
+                mig_info = path_migration_info.get(norm_p)
+                if mig_info and mig_info[1]:  # has a current global base key
+                    new_global_base_key = mig_info[1]
+                    for p, ki in current_global_path_to_key_info.items():
+                        if ki.key_string == new_global_base_key and p == norm_p:
+                            resolved_ki_for_this_def_entry = ki
+                            break
+                    if not resolved_ki_for_this_def_entry:
+                        for p, ki in current_global_path_to_key_info.items():
+                            if ki.key_string == new_global_base_key:
+                                resolved_ki_for_this_def_entry = ki
+                                break
             effective_ki_list_for_this_tracker.append(resolved_ki_for_this_def_entry)
 
         if not (
@@ -616,35 +611,37 @@ def aggregate_all_dependencies(
                         )
                         continue
 
-                    link = (source_key_gi_str, target_key_gi_str)
-                    res = local_links.get(link)
-                    if res:
-                        existing_char, existing_origins = res
-                    else:
-                        existing_char, existing_origins = None, cast(Set[str], set())
-                    try:
-                        current_priority = get_priority_from_char(dep_char_val)
-                        existing_priority = (
-                            get_priority_from_char(existing_char)
-                            if existing_char
-                            else -1
-                        )
-                    except KeyError:
-                        logger.warning(
-                            f"Aggregation: Invalid dep char '{dep_char_val}' in {os.path.basename(tracker_file_path)}. Skipping {link}."
-                        )
-                        continue
+                    link_gi = (source_key_gi_str, target_key_gi_str)
+                    link_path = (source_ki_global.norm_path, target_ki_global.norm_path)
 
-                    if current_priority > existing_priority:
-                        # Ensure type is Tuple[str, Set[str]]
-                        local_links[link] = (str(dep_char_val), {tracker_file_path})
-                    elif current_priority == existing_priority:
-                        if existing_char is not None and dep_char_val == existing_char:
-                            existing_origins.add(tracker_file_path)
-                            local_links[link] = (
-                                str(existing_char),
-                                set(existing_origins),
+                    for link in (link_gi, link_path):
+                        res = local_links.get(link)
+                        if res:
+                            existing_char, existing_origins = res
+                        else:
+                            existing_char, existing_origins = None, cast(Set[str], set())
+                        try:
+                            current_priority = get_priority_from_char(dep_char_val)
+                            existing_priority = (
+                                get_priority_from_char(existing_char)
+                                if existing_char
+                                else -1
                             )
+                        except KeyError:
+                            logger.warning(
+                                f"Aggregation: Invalid dep char '{dep_char_val}' in {os.path.basename(tracker_file_path)}. Skipping {link}."
+                            )
+                            continue
+
+                        if current_priority > existing_priority:
+                            local_links[link] = (str(dep_char_val), {tracker_file_path})
+                        elif current_priority == existing_priority:
+                            if existing_char is not None and dep_char_val == existing_char:
+                                existing_origins.add(tracker_file_path)
+                                local_links[link] = (
+                                    str(existing_char),
+                                    set(existing_origins),
+                                )
                         elif existing_char == "n":
                             # keep existing 'n'
                             pass

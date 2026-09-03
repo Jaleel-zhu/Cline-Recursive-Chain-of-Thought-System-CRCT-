@@ -11,3 +11,7 @@ debug_llm_repair.log
 .kilo/**
 cline_utils/dependency_system/utils/cache/**
 cline_docs/native_layout_engine_design_spec.md
+cline_docs/debug.txt
+cline_utils/dependency_system/core/state/**
+cline_docs/backups/*.bak
+

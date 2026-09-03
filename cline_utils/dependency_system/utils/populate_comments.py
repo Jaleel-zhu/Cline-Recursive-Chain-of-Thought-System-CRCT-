@@ -1101,32 +1101,53 @@ def _build_dep_lists(
     entry_from: List[str] = []
     exits_to: List[str] = []
 
-    if runtime_aggregation_cache and global_map:
-        key_to_path = {ki.key_string: ki.norm_path for ki in global_map.values()}
+    if runtime_aggregation_cache:
         seen_entry: Set[str] = set()
         seen_exits: Set[str] = set()
+        key_to_path = (
+            {ki.key_string: ki.norm_path for ki in global_map.values()}
+            if global_map
+            else {}
+        )
 
-        for (r_k, c_k), (char, _) in runtime_aggregation_cache.items():
+        for (r_item, c_item), (char, _) in runtime_aggregation_cache.items():
             if char in _SKIP_CHARS:
                 continue
 
-            if r_k == source_key and c_k != source_key:
-                tgt_path = key_to_path.get(c_k)
-                if tgt_path:
-                    tgt_rel = os.path.relpath(tgt_path, project_root).replace("\\", "/")
+            # Check if this cache entry is keyed by paths
+            is_path_pair = ("/" in r_item or "\\" in r_item) and ("/" in c_item or "\\" in c_item)
+            if is_path_pair:
+                if r_item == norm_path and c_item != norm_path:
+                    tgt_rel = os.path.relpath(c_item, project_root).replace("\\", "/")
                     if char in OUTBOUND:
                         seen_exits.add(tgt_rel)
                     if char in INBOUND:
                         seen_entry.add(tgt_rel)
 
-            if c_k == source_key and r_k != source_key:
-                tgt_path = key_to_path.get(r_k)
-                if tgt_path:
-                    tgt_rel = os.path.relpath(tgt_path, project_root).replace("\\", "/")
+                if c_item == norm_path and r_item != norm_path:
+                    tgt_rel = os.path.relpath(r_item, project_root).replace("\\", "/")
                     if char in OUTBOUND:
                         seen_entry.add(tgt_rel)
                     if char in INBOUND:
                         seen_exits.add(tgt_rel)
+            elif key_to_path:
+                if r_item == source_key and c_item != source_key:
+                    tgt_path = key_to_path.get(c_item)
+                    if tgt_path:
+                        tgt_rel = os.path.relpath(tgt_path, project_root).replace("\\", "/")
+                        if char in OUTBOUND:
+                            seen_exits.add(tgt_rel)
+                        if char in INBOUND:
+                            seen_entry.add(tgt_rel)
+
+                if c_item == source_key and r_item != source_key:
+                    tgt_path = key_to_path.get(r_item)
+                    if tgt_path:
+                        tgt_rel = os.path.relpath(tgt_path, project_root).replace("\\", "/")
+                        if char in OUTBOUND:
+                            seen_entry.add(tgt_rel)
+                        if char in INBOUND:
+                            seen_exits.add(tgt_rel)
 
         entry_from = list(seen_entry)
         exits_to = list(seen_exits)

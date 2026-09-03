@@ -23,6 +23,7 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
     # Import the modules we want to sandbox
     import cline_utils.dependency_system.core.key_manager as km
     import cline_utils.dependency_system.core as core
+    import cline_utils.dependency_system.core.analysis_state_manager as asm
     import cline_utils.dependency_system.utils.cache_manager as cm
     import cline_utils.dependency_system.io.transparency_manager as tm
     import cline_utils.dependency_system.utils.config_manager as config_manager
@@ -33,6 +34,7 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
     # Keep track of original values so we can restore them cleanly after the test
     orig_km_file = km.__file__
     orig_core_file = core.__file__
+    orig_asm_file = asm.__file__
     orig_cm_cache_dir = getattr(cm, "CACHE_DIR", None)
     orig_tm_registry_path = getattr(tm, "REGISTRY_PATH", None)
     orig_tm_defaults = tm.TransparencyManager.__init__.__defaults__
@@ -45,6 +47,8 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
     # 2. Sandbox core package path for resource_validator's validation cache.
     sandbox_core_init = os.path.join(str(sandbox_core_dir), "__init__.py")
     core.__file__ = sandbox_core_init
+    sandbox_asm_file = os.path.join(str(sandbox_core_dir), "analysis_state_manager.py")
+    asm.__file__ = sandbox_asm_file
 
     # 3. Sandbox cache_manager's CACHE_DIR
     cm.CACHE_DIR = str(sandbox_cache_dir)
@@ -70,6 +74,7 @@ def sandbox_dependency_system(tmp_path: Path) -> Generator[None, None, None]:
     # Restore everything to original values to prevent leakage across sessions
     km.__file__ = orig_km_file
     core.__file__ = orig_core_file
+    asm.__file__ = orig_asm_file
     if orig_cm_cache_dir is not None:
         cm.CACHE_DIR = orig_cm_cache_dir
     if orig_tm_registry_path is not None:
